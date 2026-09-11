@@ -1,9 +1,11 @@
 /* Node test for the rule lane, using the reference extractions.
    Run: node test/rules.test.js  */
 require('../src/seed.js'); require('../src/rules.js'); require('../src/prompts.js');
-require('../src/fallback.js'); require('../src/pipeline.js');
+require('../src/fallback.js'); require('../src/generator.js'); require('../src/sample.js');
+require('../src/pipeline.js');
 
 var S = globalThis.SEED, R = globalThis.RULES, FB = globalThis.FALLBACK, PL = globalThis.PIPELINE;
+var G = globalThis.GENERATOR;
 var pass = 0, fail = 0, notes = [];
 function ok(cond, label, detail) {
   if (cond) { pass++; } else { fail++; notes.push('FAIL  ' + label + (detail ? '  ->  ' + detail : '')); }
@@ -25,6 +27,111 @@ ok(R.canonCert('Grade A quality') === null, 'unknown cert not guessed');
 ok(R.addDays('2026-08-30T06:15:00Z', 15) === '2026-09-14', 'relative validity derived');
 ok(R.round4(R.fxToUsd(15.60, 'CNY', S.meta)) === 2.1818, 'CNY converted at the pinned rate');
 ok(R.median([1, 5, 3]) === 3, 'median');
+
+/* --- PRNG --------------------------------------------------------------- */
+(function () {
+  var r1 = G.rng(12345);
+  var seq1 = [r1(), r1(), r1(), r1(), r1()];
+  var r2 = G.rng(12345);
+  var seq2 = [r2(), r2(), r2(), r2(), r2()];
+  ok(JSON.stringify(seq1) === JSON.stringify(seq2), 'rng same seed → same sequence');
+
+  var r3 = G.rng(99999);
+  var seq3 = [r3(), r3(), r3()];
+  ok(JSON.stringify(seq1.slice(0, 3)) !== JSON.stringify(seq3), 'rng different seed → different sequence');
+
+  var rInt = G.rng(7);
+  var inRange = true;
+  for (var i = 0; i < 5000; i++) {
+    var v = rInt.int(3, 17);
+    if (v < 3 || v > 17) { inRange = false; break; }
+  }
+  ok(inRange, 'rng.int stays in [lo, hi]');
+
+  var rPick = G.rng(42);
+  var arr = ['a', 'b', 'c', 'd'];
+  var pickOk = true;
+  for (var j = 0; j < 200; j++) {
+    if (arr.indexOf(rPick.pick(arr)) === -1) { pickOk = false; break; }
+  }
+  ok(pickOk, 'rng.pick always returns a member');
+
+  var rW = G.rng(55);
+  var counts = { x: 0, y: 0 };
+  for (var k = 0; k < 10000; k++) {
+    var w = rW.weighted([['x', 1], ['y', 3]]);
+    counts[w]++;
+  }
+  var ratio = counts.y / counts.x;
+  ok(ratio > 2.5 && ratio < 3.5, 'rng.weighted distributes ~3:1', ratio.toFixed(2));
+
+  ok(G.seedLabel(0) === '0000', 'seedLabel(0) is 0000');
+  ok(G.seedLabel(1679615) === 'zzzz', 'seedLabel(max) is zzzz');
+  ok(G.seedFromLabel(G.seedLabel(54321)) === 54321, 'seedLabel/seedFromLabel round-trip');
+})();
+
+/* --- blank store -------------------------------------------------------- */
+ok(PL.newStore(S).rfqs.length === 4, 'default store has 4 RFQs');
+ok(PL.newStore(S, { blank: true }).rfqs.length === 0, 'blank store has 0 RFQs');
+
+/* --- sampleRequest ------------------------------------------------------ */
+(function () {
+  var seed = 98765;
+
+  var r7a = G.rng(seed);
+  var req7a = G.sampleRequest(r7a, 7);
+  ok(req7a.items.length === 7, 'sampleRequest returns 7 items');
+
+  var skus7 = {};
+  req7a.items.forEach(function (it) { skus7[it.sku] = (skus7[it.sku] || 0) + 1; });
+  ok(Object.keys(skus7).length === 7, 'sampleRequest 7-line: unique SKUs');
+
+  var floorOk7 = req7a.items.every(function (it) { return it.floor > 0 && it.ceiling > it.floor; });
+  ok(floorOk7, 'sampleRequest 7-line: floor > 0 and ceiling > floor on every item');
+
+  ok(req7a.custom_questions.length >= 3 && req7a.custom_questions.length <= 5, '7-line: 3–5 questions', req7a.custom_questions.length);
+
+  var p7 = G.draftPayload(req7a);
+  var r7check = G.readinessRules(p7);
+  ok(r7check.ready === true, 'sampleRequest 7-line draftPayload passes readiness', r7check.missing.filter(function(m){return m.severity==='must';}).map(function(m){return m.field;}).join(','));
+
+  var r30a = G.rng(seed);
+  var req30a = G.sampleRequest(r30a, 30);
+  ok(req30a.items.length === 30, 'sampleRequest returns 30 items');
+
+  var skus30 = {};
+  req30a.items.forEach(function (it) { skus30[it.sku] = (skus30[it.sku] || 0) + 1; });
+  ok(Object.keys(skus30).length === 30, 'sampleRequest 30-line: unique SKUs');
+
+  var floorOk30 = req30a.items.every(function (it) { return it.floor > 0 && it.ceiling > it.floor; });
+  ok(floorOk30, 'sampleRequest 30-line: floor > 0 and ceiling > floor on every item');
+
+  var prefixes30 = {};
+  req30a.items.forEach(function (it) { prefixes30[it.sku.split('-')[0]] = 1; });
+  ok(Object.keys(prefixes30).length >= 2, 'sampleRequest 30-line spans ≥ 2 families', Object.keys(prefixes30).join(','));
+
+  var p30 = G.draftPayload(req30a);
+  var r30check = G.readinessRules(p30);
+  ok(r30check.ready === true, 'sampleRequest 30-line draftPayload passes readiness', r30check.missing.filter(function(m){return m.severity==='must';}).map(function(m){return m.field;}).join(','));
+
+  var r7b = G.rng(seed);
+  var req7b = G.sampleRequest(r7b, 7);
+  ok(JSON.stringify(req7a) === JSON.stringify(req7b), 'sampleRequest same seed → byte-identical output');
+
+  var r7c = G.rng(seed + 1);
+  var req7c = G.sampleRequest(r7c, 7);
+  ok(JSON.stringify(req7a) !== JSON.stringify(req7c), 'sampleRequest different seed → different output');
+})();
+
+/* --- createRfq from sample --------------------------------------------- */
+(function () {
+  var blankStore = PL.newStore(S, { blank: true });
+  var req = G.sampleRequest(G.rng(11111), 30);
+  var rfq = PL.createRfq(blankStore, req);
+  ok(rfq.code === 'RFQ-2026-0401', 'createRfq on blank store: first code is RFQ-2026-0401', rfq.code);
+  ok(rfq.items && rfq.items.length === 30, 'createRfq: 30 items on multi-line request', rfq.items && rfq.items.length);
+  ok(rfq.items.every(function (it) { return it.tier_qtys && it.tier_qtys.length > 0; }), 'createRfq: tiers present on every line');
+})();
 
 /* --- full pipeline over the sample set -------------------------------- */
 var store = PL.newStore(S);

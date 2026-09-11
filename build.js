@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const dir = __dirname;
-const order = ['seed.js', 'rules.js', 'prompts.js', 'fallback.js', 'generator.js', 'guardrails.js', 'pipeline.js', 'app-core.js', 'app-views.js', 'boot.js'];
+const order = ['seed.js', 'rules.js', 'prompts.js', 'fallback.js', 'generator.js', 'sample.js', 'guardrails.js', 'pipeline.js', 'app-core.js', 'app-views.js', 'boot.js'];
 let html = fs.readFileSync(path.join(dir, 'src/index.html'), 'utf8');
 const scripts = order.map(f => {
   const src = fs.readFileSync(path.join(dir, 'src', f), 'utf8');

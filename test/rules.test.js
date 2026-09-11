@@ -1,9 +1,11 @@
 /* Node test for the rule lane, using the reference extractions.
    Run: node test/rules.test.js  */
 require('../src/seed.js'); require('../src/rules.js'); require('../src/prompts.js');
-require('../src/fallback.js'); require('../src/pipeline.js');
+require('../src/fallback.js'); require('../src/generator.js'); require('../src/sample.js');
+require('../src/pipeline.js');
 
 var S = globalThis.SEED, R = globalThis.RULES, FB = globalThis.FALLBACK, PL = globalThis.PIPELINE;
+var G = globalThis.GENERATOR;
 var pass = 0, fail = 0, notes = [];
 function ok(cond, label, detail) {
   if (cond) { pass++; } else { fail++; notes.push('FAIL  ' + label + (detail ? '  ->  ' + detail : '')); }
@@ -25,6 +27,272 @@ ok(R.canonCert('Grade A quality') === null, 'unknown cert not guessed');
 ok(R.addDays('2026-08-30T06:15:00Z', 15) === '2026-09-14', 'relative validity derived');
 ok(R.round4(R.fxToUsd(15.60, 'CNY', S.meta)) === 2.1818, 'CNY converted at the pinned rate');
 ok(R.median([1, 5, 3]) === 3, 'median');
+
+/* --- PRNG --------------------------------------------------------------- */
+(function () {
+  var r1 = G.rng(12345);
+  var seq1 = [r1(), r1(), r1(), r1(), r1()];
+  var r2 = G.rng(12345);
+  var seq2 = [r2(), r2(), r2(), r2(), r2()];
+  ok(JSON.stringify(seq1) === JSON.stringify(seq2), 'rng same seed → same sequence');
+
+  var r3 = G.rng(99999);
+  var seq3 = [r3(), r3(), r3()];
+  ok(JSON.stringify(seq1.slice(0, 3)) !== JSON.stringify(seq3), 'rng different seed → different sequence');
+
+  var rInt = G.rng(7);
+  var inRange = true;
+  for (var i = 0; i < 5000; i++) {
+    var v = rInt.int(3, 17);
+    if (v < 3 || v > 17) { inRange = false; break; }
+  }
+  ok(inRange, 'rng.int stays in [lo, hi]');
+
+  var rPick = G.rng(42);
+  var arr = ['a', 'b', 'c', 'd'];
+  var pickOk = true;
+  for (var j = 0; j < 200; j++) {
+    if (arr.indexOf(rPick.pick(arr)) === -1) { pickOk = false; break; }
+  }
+  ok(pickOk, 'rng.pick always returns a member');
+
+  var rW = G.rng(55);
+  var counts = { x: 0, y: 0 };
+  for (var k = 0; k < 10000; k++) {
+    var w = rW.weighted([['x', 1], ['y', 3]]);
+    counts[w]++;
+  }
+  var ratio = counts.y / counts.x;
+  ok(ratio > 2.5 && ratio < 3.5, 'rng.weighted distributes ~3:1', ratio.toFixed(2));
+
+  ok(G.seedLabel(0) === '0000', 'seedLabel(0) is 0000');
+  ok(G.seedLabel(1679615) === 'zzzz', 'seedLabel(max) is zzzz');
+  ok(G.seedFromLabel(G.seedLabel(54321)) === 54321, 'seedLabel/seedFromLabel round-trip');
+})();
+
+/* --- blank store -------------------------------------------------------- */
+ok(PL.newStore(S).rfqs.length === 4, 'default store has 4 RFQs');
+ok(PL.newStore(S, { blank: true }).rfqs.length === 0, 'blank store has 0 RFQs');
+
+/* --- sampleRequest ------------------------------------------------------ */
+(function () {
+  var seed = 98765;
+
+  var r7a = G.rng(seed);
+  var req7a = G.sampleRequest(r7a, 7);
+  ok(req7a.items.length === 7, 'sampleRequest returns 7 items');
+
+  var skus7 = {};
+  req7a.items.forEach(function (it) { skus7[it.sku] = (skus7[it.sku] || 0) + 1; });
+  ok(Object.keys(skus7).length === 7, 'sampleRequest 7-line: unique SKUs');
+
+  var floorOk7 = req7a.items.every(function (it) { return it.floor > 0 && it.ceiling > it.floor; });
+  ok(floorOk7, 'sampleRequest 7-line: floor > 0 and ceiling > floor on every item');
+
+  ok(req7a.custom_questions.length >= 3 && req7a.custom_questions.length <= 5, '7-line: 3–5 questions', req7a.custom_questions.length);
+
+  var p7 = G.draftPayload(req7a);
+  var r7check = G.readinessRules(p7);
+  ok(r7check.ready === true, 'sampleRequest 7-line draftPayload passes readiness', r7check.missing.filter(function(m){return m.severity==='must';}).map(function(m){return m.field;}).join(','));
+
+  var r30a = G.rng(seed);
+  var req30a = G.sampleRequest(r30a, 30);
+  ok(req30a.items.length === 30, 'sampleRequest returns 30 items');
+
+  var skus30 = {};
+  req30a.items.forEach(function (it) { skus30[it.sku] = (skus30[it.sku] || 0) + 1; });
+  ok(Object.keys(skus30).length === 30, 'sampleRequest 30-line: unique SKUs');
+
+  var floorOk30 = req30a.items.every(function (it) { return it.floor > 0 && it.ceiling > it.floor; });
+  ok(floorOk30, 'sampleRequest 30-line: floor > 0 and ceiling > floor on every item');
+
+  var prefixes30 = {};
+  req30a.items.forEach(function (it) { prefixes30[it.sku.split('-')[0]] = 1; });
+  ok(Object.keys(prefixes30).length >= 2, 'sampleRequest 30-line spans ≥ 2 families', Object.keys(prefixes30).join(','));
+
+  var p30 = G.draftPayload(req30a);
+  var r30check = G.readinessRules(p30);
+  ok(r30check.ready === true, 'sampleRequest 30-line draftPayload passes readiness', r30check.missing.filter(function(m){return m.severity==='must';}).map(function(m){return m.field;}).join(','));
+
+  var r7b = G.rng(seed);
+  var req7b = G.sampleRequest(r7b, 7);
+  ok(JSON.stringify(req7a) === JSON.stringify(req7b), 'sampleRequest same seed → byte-identical output');
+
+  var r7c = G.rng(seed + 1);
+  var req7c = G.sampleRequest(r7c, 7);
+  ok(JSON.stringify(req7a) !== JSON.stringify(req7c), 'sampleRequest different seed → different output');
+})();
+
+/* --- createRfq from sample --------------------------------------------- */
+(function () {
+  var blankStore = PL.newStore(S, { blank: true });
+  var req = G.sampleRequest(G.rng(11111), 30);
+  var rfq = PL.createRfq(blankStore, req);
+  ok(rfq.code === 'RFQ-2026-0401', 'createRfq on blank store: first code is RFQ-2026-0401', rfq.code);
+  ok(rfq.items && rfq.items.length === 30, 'createRfq: 30 items on multi-line request', rfq.items && rfq.items.length);
+  ok(rfq.items.every(function (it) { return it.tier_qtys && it.tier_qtys.length > 0; }), 'createRfq: tiers present on every line');
+})();
+
+/* --- scenarioFromToggles + renderDeterministic + back-compat ---------- */
+(function () {
+  var rfq = S.rfqs[0];
+  var supplier = S.suppliers.filter(function (s) { return (rfq.recipients || []).indexOf(s.id) >= 0; })[0];
+  if (!supplier || !rfq) return;
+
+  /* back-compat: compose() still returns a well-shaped result */
+  var res = G.compose(rfq, supplier, 'A', {}, null, S.meta, S.buyer);
+  ok(res && res.email && res.ref && res.expected, 'compose() returns {email, ref, expected}');
+  ok(res.email.sample_id === res.email.id, 'compose: email.sample_id equals email.id');
+  ok(typeof res.email.scenario === 'object', 'compose: email.scenario is stamped');
+  ok(Array.isArray(res.email.expected.gates), 'compose: email.expected.gates is an array');
+
+  /* scenarioFromToggles produces a well-shaped scenario */
+  var scen = G.scenarioFromToggles(rfq, supplier, 'B', {}, 'xlsx', S.meta, null);
+  ok(scen.kind === 'quote', 'scenarioFromToggles: kind is quote');
+  ok(scen.personaKey === 'B', 'scenarioFromToggles: personaKey preserved');
+  ok(scen.format === 'xlsx', 'scenarioFromToggles: format preserved');
+  ok(Array.isArray(scen.facts.lineData) && scen.facts.lineData.length > 0, 'scenarioFromToggles: lineData populated');
+  ok(scen.facts.lineData.every(function (ld) { return ld.bodyPrice > 0 && ld.attPrice > 0; }), 'scenarioFromToggles: prices > 0');
+
+  /* renderDeterministic: every line evidence anchors in body or transcript */
+  var rd = G.renderDeterministic(scen, rfq, S.buyer, S.meta);
+  ok(rd.email && rd.ref && rd.expected, 'renderDeterministic returns {email, ref, expected}');
+  var sources = [rd.email.body_raw].concat((rd.email.attachments || []).map(function (a) { return a.transcript || ''; }));
+  var allAnchored = rd.ref.lines.every(function (rl) {
+    if (!rl.ev) return true;
+    var check = R.evidenceOk(rl.ev, sources);
+    return check.status === 'ok' || check.status === 'approx';
+  });
+  ok(allAnchored, 'renderDeterministic: every line ev anchors in body or transcript');
+
+  /* renderDeterministic: planted problems match expected gates */
+  var scen2 = G.scenarioFromToggles(rfq, supplier, 'A', { validityMissing: true, noRfqCode: true }, 'inline', S.meta, null);
+  var rd2 = G.renderDeterministic(scen2, rfq, S.buyer, S.meta);
+  ok(rd2.expected.gates.indexOf('CRITICAL_FIELD_MISSING') >= 0, 'planted validityMissing → CRITICAL_FIELD_MISSING in gates');
+  ok(rd2.expected.gates.indexOf('RFQ_MATCH_LOW_CONF') >= 0, 'planted noRfqCode → RFQ_MATCH_LOW_CONF in gates');
+  ok(!rd2.email.body_raw.includes(rfq.code), 'noRfqCode: RFQ code absent from body');
+})();
+
+/* --- validateSupplierText --------------------------------------------- */
+(function () {
+  var rfq = S.rfqs[0];
+  var supplier = S.suppliers.filter(function (s) { return (rfq.recipients || []).indexOf(s.id) >= 0; })[0];
+  if (!supplier || !rfq) return;
+
+  var scen = G.scenarioFromToggles(rfq, supplier, 'A', {}, 'xlsx', S.meta, null);
+  var rd = G.renderDeterministic(scen, rfq, S.buyer, S.meta);
+  var att = rd.email.attachments && rd.email.attachments[0];
+  var out = { body: rd.email.body_raw, attachment: att || null };
+
+  var v = G.validateSupplierText(out, scen, rfq);
+  ok(v.ok === true, 'validateSupplierText: accepts its own renderDeterministic output', JSON.stringify(v.errors));
+
+  /* reject if a price digit is changed */
+  var ld0 = scen.facts.lineData[0];
+  var original = String(Math.round(ld0.attPrice * 100) / 100);
+  var corrupted = original.replace(/\d/, function (d) { return String((parseInt(d) + 1) % 10); });
+  var badAtt = att ? Object.assign({}, att, { transcript: att.transcript.replace(original, corrupted) }) : null;
+  var v2 = G.validateSupplierText({ body: rd.email.body_raw.replace(original, corrupted), attachment: badAtt }, scen, rfq);
+  ok(!v2.ok, 'validateSupplierText: rejects output with a corrupted price', JSON.stringify(v2.errors));
+
+  /* reject if rfq code inserted into a no-code scenario */
+  var scenNoCode = G.scenarioFromToggles(rfq, supplier, 'A', { noRfqCode: true }, 'inline', S.meta, null);
+  var rdNoCode = G.renderDeterministic(scenNoCode, rfq, S.buyer, S.meta);
+  var tamperedBody = rdNoCode.email.body_raw + '\n' + rfq.code;
+  var v3 = G.validateSupplierText({ body: tamperedBody, attachment: null }, scenNoCode, rfq);
+  ok(!v3.ok, 'validateSupplierText: rejects body with rfq code in a no-code scenario');
+})();
+
+/* --- sampleScenario --------------------------------------------------- */
+(function () {
+  var rfq = S.rfqs[0];
+  var supplier = S.suppliers.filter(function (s) { return (rfq.recipients || []).indexOf(s.id) >= 0; })[0];
+  if (!supplier || !rfq) return;
+
+  /* basic shape checks */
+  var scen = G.sampleScenario(G.rng(42), rfq, supplier);
+  ok(['quote', 'clarification', 'silent'].indexOf(scen.kind) >= 0, 'sampleScenario: kind is valid', scen.kind);
+  ok(['A','B','C','D'].indexOf(scen.personaKey) >= 0, 'sampleScenario: personaKey valid', scen.personaKey);
+  var formats = G.FORMATS_V2;
+  if (scen.kind !== 'silent') ok(formats.indexOf(scen.format) >= 0, 'sampleScenario: format is valid', scen.format);
+
+  /* null supplier → unknown sender */
+  var scen2 = G.sampleScenario(G.rng(99), rfq, null);
+  if (scen2.kind !== 'silent') ok(scen2.facts && scen2.facts.unknownSender === true, 'sampleScenario null supplier → unknownSender');
+
+  /* over 30 seeds all three kinds occur */
+  var kinds = { quote: 0, clarification: 0, silent: 0 };
+  for (var i = 0; i < 30; i++) kinds[G.sampleScenario(G.rng(i * 7 + 3), rfq, supplier).kind]++;
+  ok(kinds.quote > 0, 'sampleScenario: quote kind occurs across seeds', JSON.stringify(kinds));
+  ok(kinds.clarification > 0 || kinds.silent > 0, 'sampleScenario: non-quote kind occurs across seeds', JSON.stringify(kinds));
+
+  /* prices well-formed for quote scenarios */
+  var quoteSeen = false;
+  for (var j = 0; j < 20 && !quoteSeen; j++) {
+    var qs = G.sampleScenario(G.rng(j * 13 + 5), rfq, supplier);
+    if (qs.kind === 'quote') {
+      ok(qs.facts.lineData.every(function (ld) { return ld.bodyPrice > 0; }), 'sampleScenario quote: prices well-formed');
+      quoteSeen = true;
+    }
+  }
+})();
+
+/* --- sampleBrief + intakeRules ---------------------------------------- */
+(function () {
+  var seed = 55555;
+  var brief7 = G.sampleBrief(G.rng(seed), 7);
+  ok(brief7.omitted.length >= 2, 'sampleBrief: omits ≥ 2 fields', brief7.omitted.join(','));
+  ok(typeof brief7.text === 'string' && brief7.text.length > 20, 'sampleBrief: produces non-empty text');
+
+  var result = G.intakeRules(brief7.text, {}, S.meta);
+  ok(result && typeof result.ready === 'boolean', 'intakeRules: returns {draft, findings, questions, ready}');
+  ok(Array.isArray(result.questions), 'intakeRules: returns questions array');
+  ok(result.questions.length <= 3, 'intakeRules: at most 3 questions per turn', result.questions.length);
+
+  /* the brief omitted fields should generate questions */
+  if (!brief7.omitted.every(function (f) { return result.draft[f] != null; })) {
+    ok(result.questions.length > 0, 'intakeRules: generates questions for omitted fields when they could not be parsed');
+  }
+
+  /* row parsing: tabbed brief should recover line items */
+  var briefTabbed = G.sampleBrief(G.rng(seed + 1), 7);
+  if (briefTabbed.style === 'tabbed') {
+    var r2v = G.intakeRules(briefTabbed.text, {}, S.meta);
+    ok(!r2v.draft.items || r2v.draft.items.length >= 1, 'intakeRules: tabbed brief parsed at least 1 item');
+  }
+
+  /* answering asked fields repeatedly converges toward ready */
+  var req7 = brief7._req;
+  var workingDraft = { items: req7.items, title: req7.title, spec: req7.spec };
+  var ready = false;
+  for (var turn = 0; turn < 8 && !ready; turn++) {
+    var iter = G.intakeRules(brief7.text, workingDraft, S.meta);
+    workingDraft = iter.draft;
+    if (iter.ready) { ready = true; break; }
+    /* simulate answering by injecting dummy values for missing must fields */
+    iter.findings.missing.filter(function (m) { return m.severity === 'must'; }).forEach(function (m) {
+      if (m.field === 'pl_required' && workingDraft.pl_required == null) workingDraft.pl_required = false;
+      if ((m.field === 'title' || m.field === 'product') && !workingDraft.product && !workingDraft.title) workingDraft.title = req7.title;
+      if (m.field === 'spec_summary' && !(workingDraft.spec_summary || workingDraft.spec)) workingDraft.spec = req7.spec;
+    });
+  }
+  ok(ready, 'intakeRules: converges toward ready within 8 turns', 'turns=' + turn + ' ready=' + ready);
+})();
+
+/* --- sampleFollowUp --------------------------------------------------- */
+(function () {
+  var rfq = S.rfqs[0];
+  var supplier = S.suppliers.filter(function (s) { return (rfq.recipients || []).indexOf(s.id) >= 0; })[0];
+  if (!supplier || !rfq) return;
+
+  var fakeReply = { items: ['gap:price:L1', 'gate:CRITICAL_FIELD_MISSING:validity'], persona_key: 'D' };
+  var resD = G.sampleFollowUp(G.rng(1), rfq, supplier, fakeReply, S.meta, S.buyer);
+  ok(resD === null, 'sampleFollowUp: persona D returns null');
+
+  var fakeReplyA = { items: ['gap:price:L1', 'gate:CRITICAL_FIELD_MISSING:validity'], persona_key: 'A' };
+  var resA = G.sampleFollowUp(G.rng(2), rfq, supplier, fakeReplyA, S.meta, S.buyer);
+  ok(resA !== null, 'sampleFollowUp: persona A returns a non-null result');
+})();
 
 /* --- full pipeline over the sample set -------------------------------- */
 var store = PL.newStore(S);

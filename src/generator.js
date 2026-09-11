@@ -495,7 +495,7 @@ function fmtRow(item, priceStr, moqStr, curSymbol) {
   return item.sku + '  ' + item.product + '  qty ' + fmtQty(item.qty) + '  ' + curSymbol + priceStr + '/' + item.unit + (moqStr ? '  MOQ ' + moqStr : '');
 }
 
-function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
+function scenarioFromToggles(rfq, supplierRec, personaKey, toggles, format, meta, rng) {
   toggles = Object.assign({}, personaFor(personaKey).toggles, toggles || {});
   format = format || personaFor(personaKey).format;
   var items = R.rfqItems(rfq);
@@ -507,7 +507,9 @@ function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
 
   var lineData = quoted.map(function (item, i) {
     var mid = (item.target_usd_fob.lo + item.target_usd_fob.hi) / 2;
-    var bodyPrice = r2(mid * personaFactor(personaKey) * rate);
+    var pf = personaFactor(personaKey);
+    if (rng) pf = pf * (0.85 + rng() * 0.30);
+    var bodyPrice = r2(mid * pf * rate);
     var attPrice = toggles.attachContradicts ? r2(mid * 0.90 * rate) : bodyPrice;
     var moq = item.tier_qtys[0] || Math.max(50, Math.round(item.qty / 3));
     var hasMoq = !(toggles.missingMoqSome && i % 5 === 4);
@@ -520,12 +522,50 @@ function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
   });
 
   var certs = (rfq.required_certs || []).map(function (c, i) {
-    var last = i === (rfq.required_certs.length - 1);
-    return { name: c, canon: c, doc: !(toggles.certOnRequest && last), number: c + '-2025-' + (4000 + i * 37) };
+    return { name: c, canon: c, doc: !(toggles.certOnRequest && i === rfq.required_certs.length - 1), number: c + '-2025-' + (4000 + i * 37) };
   });
 
   var custom = (rfq.custom_questions || []).slice(0, toggles.skipQuestions ? Math.max(1, rfq.custom_questions.length - 2) : rfq.custom_questions.length)
     .map(function (cq) { return { qid: cq.qid, text: answerForQuestion(cq) }; });
+
+  return {
+    kind: 'quote', personaKey: personaKey, toggles: toggles, format: format,
+    facts: {
+      addr: addr, cur: cur, curSym: curSym, rate: rate,
+      port: supplierRec && !supplierRec.unknown ? (supplierRec.city || 'China') : 'China',
+      leadDays: 30 + (personaKey === 'B' ? 5 : 0),
+      validityDays: toggles.validityMissing ? null : 30,
+      paymentTerms: toggles.paymentRisky ? '100% T/T before production' : '30% deposit, 70% before shipment',
+      certs: certs, custom: custom, lineData: lineData,
+      plantedProblems: [].concat(
+        toggles.partialLines || toggles.cutOffImage ? ['LINES_NOT_QUOTED'] : [],
+        toggles.attachContradicts ? ['BODY_ATTACH_CONFLICT'] : [],
+        toggles.certOnRequest ? ['CERT_UNVERIFIED'] : [],
+        toggles.validityMissing ? ['CRITICAL_FIELD_MISSING'] : [],
+        toggles.paymentRisky ? ['PAYMENT_RISK'] : [],
+        toggles.specDeviationSome ? ['SPEC_DEVIATION'] : [],
+        toggles.rmbCurrency ? ['CURRENCY_CONVERTED'] : [],
+        toggles.noRfqCode ? ['RFQ_MATCH_LOW_CONF'] : [],
+        toggles.unknownSender ? ['SENDER_NOT_IN_RECIPIENTS'] : []
+      ),
+      noRfqCode: !!toggles.noRfqCode, unknownSender: !!toggles.unknownSender,
+      attachContradicts: !!toggles.attachContradicts, cutOffImage: !!toggles.cutOffImage,
+      supplierRec: supplierRec
+    }
+  };
+}
+
+function renderDeterministic(scenario, rfq, buyer, meta) {
+  var facts = scenario.facts;
+  var toggles = scenario.toggles;
+  var format = scenario.format;
+  var personaKey = scenario.personaKey;
+  var addr = facts.addr;
+  var cur = facts.cur, curSym = facts.curSym;
+  var lineData = facts.lineData;
+  var certs = facts.certs;
+  var custom = facts.custom;
+  var supplierRec = facts.supplierRec;
 
   /* ---- build the row strings once, reuse verbatim in the transcript/body and in ref.ev --- */
   var rows = lineData.map(function (ld) {
@@ -634,7 +674,7 @@ function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
 
   var expected = {
     kind: 'quote', rfq_code: toggles.noRfqCode ? null : rfq.code,
-    lines_quoted: refLines.length, lines_total: items.length,
+    lines_quoted: refLines.length, lines_total: R.rfqItems(rfq).length,
     gates: [].concat(
       toggles.partialLines || toggles.cutOffImage ? ['LINES_NOT_QUOTED'] : [],
       toggles.attachContradicts ? ['BODY_ATTACH_CONFLICT'] : [],
@@ -649,6 +689,11 @@ function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
   };
 
   if (toggles.noRfqCode) email.ref_match = { rfqCode: rfq.code, c: 0.82, why: 'The product range and line count match this open RFQ closely.' };
+
+  email.scenario = { kind: scenario.kind, personaKey: personaKey, format: format, plantedProblems: facts.plantedProblems };
+  email.sample_id = email.id;
+  email.expected = expected;
+  email.ref = ref;
 
   return { email: email, ref: ref, expected: expected };
 }
@@ -750,6 +795,53 @@ function draftLineReply(rfq, supplierName, items, lines, buyer, meta) {
   bodyLines.push('', 'Could you reply by ' + due + '?', '', 'Best regards,', buyer.name, buyer.email);
   return { subject: subject, body: bodyLines.join('\n'), source: 'rule' };
 }
+function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
+  var scenario = scenarioFromToggles(rfq, supplierRec, personaKey, toggles, format, meta, null);
+  return renderDeterministic(scenario, rfq, buyer, meta);
+}
+
+function validateSupplierText(out, scenario, rfq) {
+  var errors = [];
+  var haystack = (out.body || '') + '\n' + (out.attachment && out.attachment.transcript || '');
+  var facts = scenario.facts;
+  var lineData = facts.lineData;
+
+  lineData.forEach(function (ld) {
+    if (!haystack.includes(ld.item.sku)) {
+      errors.push({ code: 'MISSING_SKU', sku: ld.item.sku });
+    }
+    var priceStr = String(Math.round(ld.attPrice * 100) / 100);
+    if (!haystack.includes(priceStr)) {
+      errors.push({ code: 'MISSING_PRICE', sku: ld.item.sku, price: priceStr });
+    }
+  });
+
+  var moqPresent = lineData.filter(function (ld) { return ld.moq !== null; });
+  var moqInText = moqPresent.filter(function (ld) {
+    var moqStr = String(ld.moq);
+    var moqFmt = Number(ld.moq).toLocaleString('en-US');
+    return haystack.includes(moqStr) || haystack.includes(moqFmt);
+  });
+  if (moqPresent.length > 0 && moqInText.length < moqPresent.length * 0.9) {
+    errors.push({ code: 'LOW_MOQ_COVERAGE', found: moqInText.length, expected: moqPresent.length });
+  }
+
+  if (facts.noRfqCode && haystack.includes(rfq.code)) {
+    errors.push({ code: 'SPURIOUS_RFQ_CODE' });
+  }
+  if (facts.attachContradicts) {
+    var hasConflict = lineData.slice(0, 3).some(function (ld) {
+      return haystack.includes(String(Math.round(ld.bodyPrice * 100) / 100)) && haystack.includes(String(Math.round(ld.attPrice * 100) / 100)) && Math.abs(ld.bodyPrice - ld.attPrice) > 0.01;
+    });
+    if (!hasConflict) errors.push({ code: 'MISSING_BODY_ATTACH_CONFLICT' });
+  }
+  if (facts.cutOffImage && !haystack.includes('[CUT OFF]')) {
+    errors.push({ code: 'MISSING_CUT_OFF_MARKER' });
+  }
+
+  return { ok: errors.length === 0, errors: errors };
+}
+
 function answerForQuestion(cq) {
   var t = cq.text.toLowerCase();
   if (/logo|print/.test(t)) return 'Yes, every SKU can carry your logo; minimum 1,000 pcs per SKU for printing.';
@@ -763,7 +855,9 @@ root.GENERATOR = {
   readinessRules: readinessRules, generateEdgeCases: generateEdgeCases, chaseItems: chaseItems, draftReply: draftReply, tiersFor: tiersFor, Q_SUGGEST: Q_SUGGEST,
   /* v2 */
   PERSONAS: PERSONAS, TOGGLE_LIST: TOGGLE_LIST, FORMATS_V2: FORMATS_V2,
-  compose: compose, answerFollowUp: answerFollowUp, chaseItemsV2: chaseItemsV2, draftLineReply: draftLineReply
+  compose: compose, answerFollowUp: answerFollowUp, chaseItemsV2: chaseItemsV2, draftLineReply: draftLineReply,
+  /* v3 */
+  scenarioFromToggles: scenarioFromToggles, renderDeterministic: renderDeterministic, validateSupplierText: validateSupplierText
 };
 
 })(typeof window !== 'undefined' ? window : globalThis);

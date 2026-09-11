@@ -11,15 +11,15 @@
 
 var R = root.RULES, P = root.PROMPTS;
 
-function newStore(seed) {
+function newStore(seed, opts) {
+  var blank = !!(opts && opts.blank);
   return {
     meta: JSON.parse(JSON.stringify(seed.meta)),
-    rfqs: JSON.parse(JSON.stringify(seed.rfqs)),
+    rfqs: blank ? [] : JSON.parse(JSON.stringify(seed.rfqs)),
     suppliers: seed.suppliers.slice(),
     buyer: seed.buyer,
     emails: [], quotes: [], quote_headers: [], reviews: [], comparisons: [], logs: [], evals: [], replies: [],
-    awards: {}, /* rfqId -> { lines: { '<line>': {quote_id, lens, by, at, reason} } } */
-    simstate: {} /* 'rfqId:supplierId' -> last-used persona/toggles/format in the Supplier view */
+    awards: {} /* rfqId -> { lines: { '<line>': {quote_id, lens, by, at, reason} } } */
   };
 }
 
@@ -432,7 +432,7 @@ function applySupplement(store, rec, ai, rfq, supplier) {
   });
 
   /* resolve any chase reviews whose asked items are now answered */
-  var reply = store.replies.filter(function (r) { return r.email_id === rec.in_reply_to || (r.rfq_id === rfq.id && r.supplier_id === rec.supplier_id && r.status === 'sent'); })
+  var reply = store.replies.filter(function (r) { return r.id === rec.in_reply_to || (r.rfq_id === rfq.id && r.supplier_id === rec.supplier_id && r.status === 'sent'); })
     .sort(function (a, b) { return a.sent_at < b.sent_at ? 1 : -1; })[0];
   var answeredKeys = {};
   if (patch.header.expiry != null) answeredKeys['gap:validity'] = 1;
@@ -531,7 +531,7 @@ function createRfq(store, draft) {
   var hasLines = Array.isArray(draft.items) && draft.items.length;
   var rfq = {
     id: 'rfq_' + ('000' + n).slice(-4), code: 'RFQ-2026-' + ('000' + n).slice(-4),
-    product: String(draft.product || draft.title || '').trim(), spec_summary: String(draft.spec_summary || '').trim(),
+    product: String(draft.product || draft.title || '').trim(), spec_summary: String(draft.spec_summary || draft.spec || '').trim(),
     required_certs: (draft.required_certs || []).slice(), pl_required: !!draft.pl_required, custom_required: !!draft.custom_required,
     max_lead_days: Number(draft.max_lead_days) || 30, dest_port: draft.dest_port || 'Nhava Sheva, India', incoterm: 'FOB',
     custom_questions: (draft.custom_questions || []).map(function (q, i) { return { qid: 'q' + (i + 1), text: q.text, required: q.required !== false }; }),

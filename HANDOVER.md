@@ -9,6 +9,35 @@ eligible quotes as Cheapest, Best value and Recommended winner. A person always 
 It was built for vFulfill's sourcing team as a demo of the data layer and winner
 recommendation before a real Gmail connection exists.
 
+## v2: multi-line RFQs (read this first if you know v1)
+
+An RFQ can now carry many line items (`rfq.items[]`: sku, product, spec, qty, unit, its own
+price band) instead of one product. Terms (certifications, private label, incoterm, lead time,
+payment, validity, custom questions) live once on the RFQ; each line has its own price, MOQ and
+optional lead-time override. `R.normalizeRfq` synthesises a one-line `items[]` from every
+legacy RFQ, so nothing about the original single-product flow changed — `src/rules.js`'s
+`validateV1`/v1 `eligibility` grouping and all 106 original tests are untouched. A second AI
+output shape (`ai.sv === 2`: `terms` once + one compact row per `lines[]`) is used only for
+multi-line RFQs, dispatched in `R.validate`.
+
+New surfaces: **Supplier view** (`#/supplier`) is a simulated supplier side — pick a persona
+(complete / partial / contradictory attachment / unknown sender) and a checklist of edge cases,
+and `G.compose` writes a full quotation instantly, no AI, with its own reference read so the
+demo works with Claude off. **Quotations** (`#/quotations/:rfqId`) is a line-by-line matrix
+across suppliers with Cheapest (rule) and Best value (one Claude call over contested lines
+only) side by side, a chase-and-simulated-reply loop per line, and per-line or bulk award.
+Reviews can now name several lines at once ("MOQ missing on 12 lines") instead of one row per
+line; resolving one closes all of them. See `docs/PLAN.md`'s second entry (or `git log`) for
+the full design rationale, matching, coalescing and supplement-merge rules, and the review that
+shaped them.
+
+Known simplifications, deliberate: line matching is SKU-first with a name-similarity fallback,
+not a formal trust-scored heuristic; the Supplier view composer is deterministic template logic,
+not a seeded PRNG; per-line review resolution supports "accept/edit all open lines" but not a
+full per-row expansion; a v2 quote's evidence can go stale if the presenter edits the generated
+text by hand before sending (reference-mode confidence drops gracefully, Claude just re-reads
+whatever text is there). None of these affect the demo flow below.
+
 ## Three lanes, always visible
 
 Every field and decision carries a badge:

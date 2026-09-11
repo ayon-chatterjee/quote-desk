@@ -8,9 +8,13 @@ function fmtLabel(k) { var f = S.formats.filter(function (x) { return x.key === 
 function shortDate(d) { return String(d || '').slice(0, 10); }
 function pct(n) { return Math.round(n * 100) + '%'; }
 function n0(v) { return v == null ? '—' : Number(v).toLocaleString('en-US'); }
+function uniqLines(a) { var o = {}, r = []; a.forEach(function (x) { if (x != null && !o[x]) { o[x] = 1; r.push(x); } }); return r; }
 function rfqMeta(rfq) {
-  return n0(rfq.target_qty) + ' ' + esc(rfq.unit) + ' · USD ' + rfq.target_usd_fob.lo.toFixed(2) + '–' + rfq.target_usd_fob.hi.toFixed(2) + ' FOB · ' +
-    esc((rfq.required_certs || []).join(' + ') || 'no certs required') + (rfq.pl_required ? ' · private label' : '');
+  var items = R.rfqItems(rfq);
+  var qtyBand = items.length > 1
+    ? items.length + ' line item(s)'
+    : n0(items[0].qty) + ' ' + esc(items[0].unit) + ' · USD ' + items[0].target_usd_fob.lo.toFixed(2) + '–' + items[0].target_usd_fob.hi.toFixed(2) + ' FOB';
+  return qtyBand + ' · ' + esc((rfq.required_certs || []).join(' + ') || 'no certs required') + (rfq.pl_required ? ' · private label' : '');
 }
 function supStatusChip(st) { return chip(st === 'awaiting' ? 'awaiting_reply' : st); }
 
@@ -25,16 +29,19 @@ A.route(/^\/rfqs$/, function () {
 
 function rfqCard(rfq) {
   var qs = A.quotesFor(rfq.id);
+  var multiLine = A.isMultiLine(rfq);
   var rows = PL.supplierStatuses(A.store, rfq);
   var replied = rows.filter(function (r) { return r.status !== 'awaiting'; }).length;
   var el = qs.filter(function (q) { return q.eligibility && q.eligibility.status === 'eligible'; }).length;
   var waiting = A.unsynced().filter(function (e) { return e.rfq_id === rfq.id; }).length;
+  var compareHref = multiLine ? '#/quotations/' + rfq.id : '#/compare/' + rfq.id;
   return '<div class="card"><div class="spread" style="margin-bottom:8px">' +
     '<div><h2>' + esc(rfq.product) + '</h2>' +
     '<div class="muted" style="font-size:12.5px;margin-top:2px"><span class="tag">' + esc(rfq.code) + '</span> ' + rfqMeta(rfq) + '</div></div>' +
     '<div class="row">' + (rfq.status === 'awarded' ? '<span class="chip chip-pass">Awarded</span>' : '') +
+    (multiLine ? '<a class="btn ghost sm" href="#/supplier/' + rfq.id + '/A" style="text-decoration:none">Supplier view</a>' : '') +
     '<a class="btn ghost sm" href="#/rfq/' + rfq.id + '" style="text-decoration:none">Detail</a>' +
-    (qs.length ? '<a class="btn sm" href="#/compare/' + rfq.id + '" style="text-decoration:none">Compare ' + qs.length + '</a>' : '') +
+    (qs.length ? '<a class="btn sm" href="' + compareHref + '" style="text-decoration:none">' + (multiLine ? 'Quotations' : 'Compare ' + qs.length) + '</a>' : '') +
     '</div></div>' +
     '<div class="row" style="gap:6px;margin-bottom:10px;font-size:12px">' +
       '<span class="chip chip-mute">Sent to ' + rows.filter(function (r) { return r.recipient; }).length + '</span>' +
@@ -43,8 +50,9 @@ function rfqCard(rfq) {
       (waiting ? '<span class="chip chip-info">' + waiting + ' in inbox, not synced</span>' : '') +
       (qs.length ? '<span class="muted">' + el + ' of ' + qs.length + ' quotes pass the hard criteria</span>' : '') +
     '</div>' +
-    (qs.length ? quoteTable(qs, rfq) : '<div class="empty" style="padding:16px;font-size:12.5px">No quotes read yet. ' +
-      (waiting ? '<a href="#/inbox">Sync the inbox</a> to pull in ' + A.plural(waiting, 'reply', 'replies') + '.' : 'Replies land in <a href="#/inbox">Emails</a>.') + '</div>') +
+    (!qs.length ? '<div class="empty" style="padding:16px;font-size:12.5px">No quotes read yet. ' +
+      (waiting ? '<a href="#/inbox">Sync the inbox</a> to pull in ' + A.plural(waiting, 'reply', 'replies') + '.' : multiLine ? 'Compose replies in <a href="#/supplier/' + rfq.id + '/A">Supplier view</a>.' : 'Replies land in <a href="#/inbox">Emails</a>.') + '</div>'
+      : multiLine ? '' : quoteTable(qs, rfq)) +
     '</div>';
 }
 
@@ -55,7 +63,8 @@ var UNITS = ['pc', 'set', 'pair', 'kg', 'm'];
 function newDraft() {
   return { step: 1, product: '', spec_summary: '', target_qty: '', unit: 'pc', tier_qtys: '', target_usd_fob: { lo: '', hi: '' },
     required_certs: [], pl_required: null, custom_required: null, max_lead_days: '', dest_port: 'Nhava Sheva, India',
-    custom_questions: [], distribution: 'all', recipients: [], check: null, checking: false };
+    custom_questions: [], distribution: 'all', recipients: [], check: null, checking: false,
+    multiLine: false, items: [] };
 }
 function exampleDraft() {
   var d = newDraft();
@@ -66,22 +75,55 @@ function exampleDraft() {
   d.custom_questions = [{ text: 'Can you match Pantone 7499 C on the lid?', required: true }];
   return d;
 }
+function multiLineExampleDraft() {
+  var d = newDraft();
+  d.multiLine = true;
+  d.product = 'Private-label kitchen and dining range';
+  d.spec_summary = 'Thirty-SKU private-label kitchen and dining collection: silicone tools, bamboo boards and accessories, glass storage with bamboo lids, stainless steel tools, and kraft-lined lunch boxes.';
+  d.items = S.sampleLines30.map(function (it) { return Object.assign({}, it); });
+  d.required_certs = ['FDA', 'LFGB']; d.pl_required = true; d.custom_required = true; d.max_lead_days = 40;
+  d.custom_questions = [
+    { text: 'Can every SKU carry our 1-colour logo, and is there a minimum quantity per SKU for logo printing?', required: true },
+    { text: 'Which SKUs, if any, cannot be produced at the quantities we have asked for?', required: true },
+    { text: 'What is the earliest production slot you can offer for an order across the whole range?', required: true }
+  ];
+  return d;
+}
+/* Tab-separated, not comma-separated: the product and spec text almost always contains a
+   comma of its own ("Silicone spoon set, 2pc"), which would otherwise split mid-field. A tab
+   is what a spreadsheet paste already uses, so this also doubles as "paste from Excel". */
+function itemsToCsv(items) {
+  return items.map(function (it) { return [it.sku, it.product, it.spec || '', it.qty, it.unit || 'pc', it.floor, it.ceiling].join('\t'); }).join('\n');
+}
+function csvToItems(text) {
+  return String(text || '').split('\n').map(function (line) { return line.replace(/\r$/, ''); }).filter(function (l) { return l.trim(); }).map(function (line) {
+    var parts = line.split('\t').map(function (p) { return p.trim(); });
+    if (parts.length < 4) parts = line.split(',').map(function (p) { return p.trim(); }); /* tolerate a comma-separated paste too */
+    return { sku: parts[0] || '', product: parts[1] || '', spec: parts[2] || '', qty: Number(parts[3]) || 0, unit: parts[4] || 'pc', floor: Number(parts[5]) || 0, ceiling: Number(parts[6]) || 0 };
+  });
+}
 function normDraft(d) {
-  var tiers = String(d.tier_qtys || '').split(/[,\s]+/).map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; });
-  return {
+  var base = {
     product: String(d.product || '').trim(), spec_summary: String(d.spec_summary || '').trim(),
-    target_qty: Number(d.target_qty) || 0, unit: d.unit || 'pc', tier_qtys: tiers,
-    target_usd_fob: { lo: d.target_usd_fob.lo === '' ? null : Number(d.target_usd_fob.lo), hi: d.target_usd_fob.hi === '' ? null : Number(d.target_usd_fob.hi) },
     required_certs: d.required_certs.slice(), pl_required: d.pl_required, custom_required: d.custom_required,
     max_lead_days: Number(d.max_lead_days) || null, dest_port: String(d.dest_port || '').trim(),
     custom_questions: d.custom_questions.slice(), distribution: d.distribution, recipients: d.recipients.slice(), check: d.check
   };
+  if (d.multiLine) { base.items = d.items.map(function (it) { return Object.assign({}, it); }); return base; }
+  var tiers = String(d.tier_qtys || '').split(/[,\s]+/).map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; });
+  base.target_qty = Number(d.target_qty) || 0; base.unit = d.unit || 'pc'; base.tier_qtys = tiers;
+  base.target_usd_fob = { lo: d.target_usd_fob.lo === '' ? null : Number(d.target_usd_fob.lo), hi: d.target_usd_fob.hi === '' ? null : Number(d.target_usd_fob.hi) };
+  return base;
 }
 function readDraftForm() {
   var d = A.draft; if (!d || !$('#d-product')) return d;
   d.product = $('#d-product').value; d.spec_summary = $('#d-spec').value;
-  d.target_qty = $('#d-qty').value; d.unit = $('#d-unit').value; d.tier_qtys = $('#d-tiers').value;
-  d.target_usd_fob = { lo: $('#d-lo').value, hi: $('#d-hi').value };
+  if (d.multiLine) {
+    var ta = $('#d-lines-csv'); if (ta) d.items = csvToItems(ta.value);
+  } else {
+    d.target_qty = $('#d-qty').value; d.unit = $('#d-unit').value; d.tier_qtys = $('#d-tiers').value;
+    d.target_usd_fob = { lo: $('#d-lo').value, hi: $('#d-hi').value };
+  }
   var pl = $('input[name="d-pl"]:checked'); d.pl_required = pl ? pl.value === 'yes' : null;
   var cu = $('input[name="d-custom"]:checked'); d.custom_required = cu ? cu.value === 'custom' : null;
   d.max_lead_days = $('#d-lead').value; d.dest_port = $('#d-port').value;
@@ -99,10 +141,16 @@ function wizard() {
     var n = i + 1; return '<span class="' + (n === d.step ? 'on' : n < d.step ? 'done' : '') + '">' + s[0] + ' · ' + s[1] + '</span>';
   }).join('') + '</div>';
   var head = '<div class="page-head"><div><a href="#/rfqs" style="font-size:12.5px">← Inquiries</a><h1 style="margin-top:3px">New inquiry</h1></div>' +
-    '<div class="row">' + (d.step === 1 ? '<button class="btn ghost sm" data-act="draft-example">Fill with an example</button>' : '') +
+    '<div class="row">' + (d.step === 1 ? '<button class="btn ghost sm" data-act="draft-example">Fill with an example</button><button class="btn ghost sm" data-act="draft-example-lines">Load the 30-line sample</button>' : '') +
     '<button class="btn ghost sm" data-act="draft-reset">Start over</button></div></div>' + steps;
   if (d.step === 3) return head + '<div class="wizard">' + summaryCard(d) + distributionCard(d) + '</div>';
   return head + '<div class="wizard">' + draftForm(d) + (d.step === 2 || d.checking || d.check ? readinessCard(d) : hintsCard()) + '</div>';
+}
+
+function linesEditor(d) {
+  return '<label class="f wide"><span class="spread">Line items<span class="muted" style="font-weight:400;font-size:11.5px">' + d.items.length + ' line(s)</span></span>' +
+    '<textarea id="d-lines-csv" rows="10" style="font-family:var(--mono);font-size:11.5px;white-space:pre" placeholder="sku[Tab]product[Tab]spec[Tab]qty[Tab]unit[Tab]floor[Tab]ceiling — one line per row">' + esc(itemsToCsv(d.items)) + '</textarea>' +
+    '<span class="muted" style="font-size:11px;font-weight:400">One row per line item, fields separated by Tab: SKU, product, spec, quantity, unit, floor price, ceiling price (USD FOB) — paste straight from a spreadsheet, or edit here and reload the sample if you get stuck.</span></label>';
 }
 
 function draftForm(d) {
@@ -113,12 +161,15 @@ function draftForm(d) {
       (miss[field] ? ' <span class="chip ' + (miss[field] === 'must' ? 'chip-crit' : 'chip-warn') + '" style="font-size:10px;padding:0 6px">' + (miss[field] === 'must' ? 'needed' : 'improve') + '</span>' : '') + inner + '</label>';
   }
   return '<div class="card"><div class="form">' +
-    f('product', 'Product name', '<input type="text" id="d-product" value="' + esc(d.product) + '" placeholder="e.g. Collapsible silicone water bottle, 550 ml">', true) +
-    f('spec_summary', 'Specification', '<textarea id="d-spec" rows="3" placeholder="Material, dimensions, finish, print, packaging">' + esc(d.spec_summary) + '</textarea>', true) +
+    '<label class="f wide" style="flex-direction:row;align-items:center;gap:8px;font-weight:600"><input type="checkbox" id="d-multiline" data-change="multiline"' + (d.multiLine ? ' checked' : '') + ' style="width:auto"> This inquiry has multiple line items (a bill of materials, not one product)</label>' +
+    f(d.multiLine ? 'title' : 'product', d.multiLine ? 'Title for the range' : 'Product name', '<input type="text" id="d-product" value="' + esc(d.product) + '" placeholder="' + (d.multiLine ? 'e.g. Private-label kitchen and dining range' : 'e.g. Collapsible silicone water bottle, 550 ml') + '">', true) +
+    f('spec_summary', d.multiLine ? 'General specification' : 'Specification', '<textarea id="d-spec" rows="3" placeholder="Material, dimensions, finish, print, packaging">' + esc(d.spec_summary) + '</textarea>', true) +
+    (d.multiLine ? linesEditor(d) : (
     f('target_qty', 'Quantity we intend to order', '<div class="row" style="gap:6px;flex-wrap:nowrap"><input type="number" id="d-qty" value="' + esc(d.target_qty) + '" min="1" style="flex:1">' +
       '<select id="d-unit" style="width:90px">' + UNITS.map(function (u) { return '<option' + (u === d.unit ? ' selected' : '') + '>' + u + '</option>'; }).join('') + '</select></div>') +
     f('tier_qtys', 'Quantities to price (comma separated)', '<input type="text" id="d-tiers" value="' + esc(d.tier_qtys) + '" placeholder="2000, 5000, 10000">') +
-    f('target_usd_fob', 'Target price band, USD FOB China', '<div class="row" style="gap:6px;flex-wrap:nowrap"><input type="number" step="0.01" id="d-lo" value="' + esc(d.target_usd_fob.lo) + '" placeholder="floor"><span class="muted">to</span><input type="number" step="0.01" id="d-hi" value="' + esc(d.target_usd_fob.hi) + '" placeholder="ceiling"></div>') +
+    f('target_usd_fob', 'Target price band, USD FOB China', '<div class="row" style="gap:6px;flex-wrap:nowrap"><input type="number" step="0.01" id="d-lo" value="' + esc(d.target_usd_fob.lo) + '" placeholder="floor"><span class="muted">to</span><input type="number" step="0.01" id="d-hi" value="' + esc(d.target_usd_fob.hi) + '" placeholder="ceiling"></div>')
+    )) +
     f('max_lead_days', 'Latest acceptable lead time, days', '<input type="number" id="d-lead" value="' + esc(d.max_lead_days) + '" placeholder="30">') +
     f('required_certs', 'Required certifications', '<div class="chips">' + CERT_OPTIONS.map(function (c) {
       return '<button type="button" data-act="cert" data-c="' + c + '" aria-pressed="' + (d.required_certs.indexOf(c) > -1) + '">' + c + '</button>';
@@ -178,17 +229,22 @@ function readinessCard(d) {
 function summaryCard(d) {
   var n = normDraft(d);
   var code = 'RFQ-2026-' + ('000' + PL.nextCode(A.store)).slice(-4);
+  var qtyRow = n.items
+    ? '<dt>Lines</dt><dd>' + n.items.length + ' line item(s), ' + n0(n.items.reduce(function (a, it) { return a + it.qty; }, 0)) + ' units total</dd>'
+    : '<dt>Quantity</dt><dd>' + n0(n.target_qty) + ' ' + esc(n.unit) + ' · price at ' + esc(n.tier_qtys.join(', ') || n0(n.target_qty)) + '</dd>' +
+      '<dt>Target</dt><dd>USD ' + (n.target_usd_fob.lo || 0).toFixed(2) + ' – ' + (n.target_usd_fob.hi || 0).toFixed(2) + ' FOB China</dd>';
   return '<div class="card"><div class="eyebrow" style="margin-bottom:7px">What will be sent</div><h2 style="margin-bottom:6px">' + esc(n.product) + '</h2>' +
     '<dl class="gcard" style="border:0;padding:0;background:none;margin:0">' +
     '<dt>Code</dt><dd class="mono">' + code + '</dd>' +
-    '<dt>Spec</dt><dd>' + esc(n.spec_summary) + '</dd>' +
-    '<dt>Quantity</dt><dd>' + n0(n.target_qty) + ' ' + esc(n.unit) + ' · price at ' + esc(n.tier_qtys.join(', ') || n0(n.target_qty)) + '</dd>' +
-    '<dt>Target</dt><dd>USD ' + (n.target_usd_fob.lo || 0).toFixed(2) + ' – ' + (n.target_usd_fob.hi || 0).toFixed(2) + ' FOB China</dd>' +
+    '<dt>Spec</dt><dd>' + esc(n.spec_summary) + '</dd>' + qtyRow +
     '<dt>Certs</dt><dd>' + esc(n.required_certs.join(', ') || 'none') + '</dd>' +
     '<dt>Label</dt><dd>' + (n.pl_required ? 'Private label required' : 'Not required') + ' · ' + (n.custom_required ? 'made to our spec' : 'off-the-shelf acceptable') + '</dd>' +
     '<dt>Lead</dt><dd>up to ' + (n.max_lead_days || 30) + ' days · to ' + esc(n.dest_port) + '</dd>' +
     '<dt>Questions</dt><dd><ol style="margin:0;padding-left:16px">' + n.custom_questions.map(function (q) { return '<li>' + esc(q.text) + '</li>'; }).join('') + '</ol></dd>' +
-    '</dl><div class="row" style="margin-top:12px"><button class="btn ghost sm" data-act="draft-back">← Back to the check</button></div></div>';
+    '</dl>' + (n.items ? '<div class="hr"></div><div class="scroll-x"><table class="matrix" style="font-size:11.5px"><thead><tr><th>Line</th><th>SKU</th><th>Product</th><th>Qty</th><th>Band</th></tr></thead><tbody>' +
+      n.items.map(function (it, i) { return '<tr><td>' + (i + 1) + '</td><td class="mono">' + esc(it.sku) + '</td><td>' + esc(it.product) + '</td><td>' + n0(it.qty) + ' ' + esc(it.unit) + '</td><td>' + it.floor.toFixed(2) + '–' + it.ceiling.toFixed(2) + '</td></tr>'; }).join('') +
+      '</tbody></table></div>' : '') +
+    '<div class="row" style="margin-top:12px"><button class="btn ghost sm" data-act="draft-back">← Back to the check</button></div></div>';
 }
 
 function distributionCard(d) {
@@ -228,12 +284,19 @@ A.draftSubmit = function () {
   if (!recips.length) { A.toast('Choose at least one supplier.'); return; }
   n.recipients = recips; n.distribution = d.distribution;
   var rfq = PL.createRfq(A.store, n);
+  var multiLine = A.isMultiLine(rfq);
   A.draft = null;
-  var key = 'gen_' + rfq.id;
-  A.running[key] = { phase: 'gen', text: '' };
   A.persistAll();
   A.go('#/rfq/' + rfq.id);
   A.toast(rfq.code + ' sent to ' + A.plural(recips.length, 'supplier') + '.');
+  if (multiLine) {
+    A.toast(rfq.code + ' sent. Go to Supplier view to compose each supplier\'s reply.');
+    A.render();
+    return;
+  }
+  var key = 'gen_' + rfq.id;
+  A.running[key] = { phase: 'gen', text: '' };
+  A.render();
   var ad = A.adapters(A.aiReady ? 'ai' : 'reference', { onText: function (u) { if (A.running[key]) { A.running[key].text = u.text; var b = $('#gen-progress'); if (b) b.textContent = u.text.length.toLocaleString() + ' characters written so far'; } } });
   ad.generate(rfq).then(function (res) {
     res.emails.forEach(function (e) { if (!A.sampleById(e.id)) A.composed.push(e); });
@@ -258,49 +321,72 @@ A.route(/^\/rfq\/(.+)$/, function (id) {
     ' <span id="gen-progress" class="muted" style="font-weight:400">' + (gen.text ? gen.text.length.toLocaleString() + ' characters so far' : 'first words can take a minute') + '</span></div>';
   else if (waiting) banner = '<div class="banner ok" style="margin-bottom:14px">' + A.plural(waiting, 'supplier reply', 'supplier replies') + ' waiting in the inbox. <a href="#/inbox" style="margin-left:auto">Sync the inbox →</a></div>';
 
+  var multiLine = A.isMultiLine(rfq);
   var rows = PL.supplierStatuses(A.store, rfq);
-  var supTable = '<div class="scroll-x"><table class="qtable" style="min-width:760px"><thead><tr><th>Supplier</th><th>Status</th><th>Latest email</th><th>Files</th><th>Quote</th><th>Missing</th><th></th></tr></thead><tbody>' +
+  var supTable = '<div class="scroll-x"><table class="qtable" style="min-width:760px"><thead><tr><th>Supplier</th><th>Status</th><th>Latest email</th><th>Files</th><th>' + (multiLine ? 'Lines' : 'Quote') + '</th><th>Missing</th><th></th></tr></thead><tbody>' +
     rows.map(function (r) {
       var e = r.emails[0], q = r.quotes[0];
       var files = e ? (e.attachments || []).map(function (a, i) {
         return '<span class="filechip">' + esc(a.name) + '<button data-act="download" data-em="' + esc(e.id) + '" data-i="' + i + '" title="Save this file">Save</button></span>';
       }).join(' ') : '';
-      var missing = q ? (q.gaps || []).length + (A.store.reviews.filter(function (rv) { return rv.quote_id === q.id && rv.status === 'open'; }).length) : 0;
+      var quoteCell, missing;
+      if (multiLine) {
+        var priced = r.quotes.filter(function (x) { return x.norm.usd_at_target && x.norm.usd_at_target.v != null; }).length;
+        quoteCell = r.quotes.length ? priced + ' of ' + r.quotes.length + ' priced' : '<span class="muted">—</span>';
+        missing = r.quotes.reduce(function (a, x) { return a + (x.gaps || []).length; }, 0) + A.store.reviews.filter(function (rv) { return rv.rfq_id === rfq.id && rv.status === 'open' && (rv.header_id ? (r.quotes[0] && rv.header_id === r.quotes[0].header_id) : r.quotes.some(function (x) { return x.id === rv.quote_id; })); }).length;
+      } else {
+        quoteCell = q && q.norm.usd_at_target.v != null ? '<span class="price">' + Number(q.norm.usd_at_target.v).toFixed(3) + '</span><div class="muted" style="font-size:11px">min ' + n0(q.norm.moq_pcs.v) + '</div>' : q ? '<span class="muted">no comparable price</span>' : '<span class="muted">—</span>';
+        missing = q ? (q.gaps || []).length + (A.store.reviews.filter(function (rv) { return rv.quote_id === q.id && rv.status === 'open'; }).length) : 0;
+      }
       return '<tr>' +
         '<td class="supcell"><b>' + esc(r.supplier.name) + '</b><span>' + (r.supplier.unknown ? '<span class="chip chip-crit" style="font-size:10px">not on our list</span>' : (r.supplier.verified ? 'verified' : 'unverified') + (r.supplier.city ? ' · ' + esc(r.supplier.city) : '')) + '</span></td>' +
         '<td>' + supStatusChip(r.status) + (r.reply && r.reply.status === 'draft' ? '<div style="margin-top:3px"><span class="chip chip-warn" style="font-size:10px">reply waiting for approval</span></div>' : '') + '</td>' +
         '<td style="font-size:12px">' + (e ? '<a href="#/email/' + esc(e.id) + '">' + esc(e.subject) + '</a><div class="muted">' + shortDate(e.date) + ' · ' + esc(fmtLabel(e.format)) + '</div>' : '<span class="muted">sent ' + esc(rfq.sent_at) + '</span>') + '</td>' +
         '<td style="font-size:12px">' + (files || '<span class="muted">—</span>') + '</td>' +
-        '<td>' + (q && q.norm.usd_at_target.v != null ? '<span class="price">' + Number(q.norm.usd_at_target.v).toFixed(3) + '</span><div class="muted" style="font-size:11px">min ' + n0(q.norm.moq_pcs.v) + '</div>' : q ? '<span class="muted">no comparable price</span>' : '<span class="muted">—</span>') + '</td>' +
-        '<td>' + (q ? (missing ? '<span class="chip chip-warn">' + missing + ' open</span>' : '<span class="chip chip-pass">complete</span>') : e && e.kind === 'clarification' ? '<span class="chip chip-info">asked us questions</span>' : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + quoteCell + '</td>' +
+        '<td>' + (q || r.quotes.length ? (missing ? '<span class="chip chip-warn">' + missing + ' open</span>' : '<span class="chip chip-pass">complete</span>') : e && e.kind === 'clarification' ? '<span class="chip chip-info">asked us questions</span>' : '<span class="muted">—</span>') + '</td>' +
         '<td>' + (e ? '<a class="btn ghost sm" href="#/email/' + esc(e.id) + '" style="text-decoration:none;white-space:nowrap">Analyse</a>' : '') + '</td></tr>';
     }).join('') + '</tbody></table></div>';
+
+  var items = R.rfqItems(rfq);
+  var compareHref = multiLine ? '#/quotations/' + id : '#/compare/' + id;
+  var termsBlock = multiLine
+    ? '<dt>Lines</dt><dd>' + items.length + ' line item(s)</dd>'
+    : '<dt>Quantity</dt><dd>' + n0(rfq.target_qty) + ' ' + esc(rfq.unit) + '</dd><dt>Target</dt><dd>USD ' + rfq.target_usd_fob.lo.toFixed(2) + ' – ' + rfq.target_usd_fob.hi.toFixed(2) + ' FOB China</dd>';
+  var linesTable = multiLine ? '<div class="hr"></div><div class="scroll-x"><table class="matrix" style="font-size:11.5px"><thead><tr><th>Line</th><th>SKU</th><th>Product</th><th>Qty</th><th>Band</th></tr></thead><tbody>' +
+    items.map(function (it) { return '<tr><td>' + it.line + '</td><td class="mono">' + esc(it.sku) + '</td><td>' + esc(it.product) + '</td><td>' + n0(it.qty) + ' ' + esc(it.unit) + '</td><td>' + it.target_usd_fob.lo.toFixed(2) + '–' + it.target_usd_fob.hi.toFixed(2) + '</td></tr>'; }).join('') +
+    '</tbody></table></div>' : '';
 
   return '<div class="page-head"><div><a href="#/rfqs" style="font-size:12.5px">← Inquiries</a>' +
     '<h1 style="margin-top:3px">' + esc(rfq.product) + '</h1><div class="muted" style="font-size:12.5px"><span class="tag">' + esc(rfq.code) + '</span> ' + rfqMeta(rfq) + '</div></div>' +
     '<div class="row">' + (rfq.status === 'awarded' ? '<span class="chip chip-pass">Awarded</span>' : '') +
-    (qs.length ? '<a class="btn" href="#/compare/' + id + '" style="text-decoration:none">Compare</a>' : '') + '</div></div>' + banner +
+    (multiLine ? '<a class="btn ghost" href="#/supplier/' + id + '/A" style="text-decoration:none">Supplier view</a>' : '') +
+    '<a class="btn" href="' + compareHref + '" style="text-decoration:none">' + (multiLine ? 'Quotations' : 'Compare') + '</a></div></div>' + banner +
     '<div class="card" style="margin-bottom:16px"><div class="spread" style="margin-bottom:8px"><div><div class="eyebrow">Suppliers</div><h3>Who has answered</h3></div>' +
     '<span class="muted" style="font-size:12px">sent ' + esc(rfq.sent_at) + ' · reply by ' + esc(rfq.deadline) + '</span></div>' + supTable + '</div>' +
     '<details class="more" style="margin-bottom:16px"><summary>What we asked for</summary><div class="grid2" style="margin-top:10px">' +
-    '<div><dl class="gcard" style="border:0;padding:0;background:none;margin:0">' +
-      '<dt>Quantity</dt><dd>' + n0(rfq.target_qty) + ' ' + esc(rfq.unit) + '</dd>' +
-      '<dt>Target</dt><dd>USD ' + rfq.target_usd_fob.lo.toFixed(2) + ' – ' + rfq.target_usd_fob.hi.toFixed(2) + ' FOB China</dd>' +
+    '<div><dl class="gcard" style="border:0;padding:0;background:none;margin:0">' + termsBlock +
       '<dt>Certs</dt><dd>' + esc((rfq.required_certs || []).join(', ') || 'none') + '</dd>' +
       '<dt>Label</dt><dd>' + (rfq.pl_required ? 'Private label required' : 'Not required') + '</dd>' +
       '<dt>Lead</dt><dd>up to ' + rfq.max_lead_days + ' days</dd>' +
     '</dl></div><div><div class="eyebrow" style="margin-bottom:5px">Questions we asked</div>' +
       '<ol style="margin:0;padding-left:18px;font-size:12.5px">' + (rfq.custom_questions || []).map(function (q) { return '<li>' + esc(q.text) + (q.required ? '' : ' <span class="muted">(optional)</span>') + '</li>'; }).join('') + '</ol>' +
-      '<div class="muted" style="font-size:12px;margin-top:7px">' + esc(rfq.spec_summary) + '</div></div></div></details>' +
-    (qs.length ? '<div class="card"><div class="eyebrow" style="margin-bottom:8px">Quotes</div>' + quoteTable(qs, rfq) + '</div>' : '');
+      '<div class="muted" style="font-size:12px;margin-top:7px">' + esc(rfq.spec_summary) + '</div></div></div>' + linesTable + '</details>' +
+    (!multiLine && qs.length ? '<div class="card"><div class="eyebrow" style="margin-bottom:8px">Quotes</div>' + quoteTable(qs, rfq) + '</div>' : '');
 });
 
 /* ===================== inbox ===================== */
 A.route(/^\/inbox$/, function () {
   var arrived = A.arrived(), waiting = A.unsynced(), processed = A.store.emails.length;
-  var counts = {};
-  arrived.forEach(function (e) { counts[e.format] = (counts[e.format] || 0) + 1; });
+  var counts = {}, labelCounts = { manual: 0, processed: 0 };
+  arrived.forEach(function (e) {
+    counts[e.format] = (counts[e.format] || 0) + 1;
+    var rec = A.emailById(e.id);
+    if (rec && rec.label === 'manual') labelCounts.manual++;
+    else if (rec) labelCounts.processed++;
+  });
   var unread = arrived.filter(function (e) { return !A.emailById(e.id); }).length;
+  var openItems = A.openReviews().length + A.draftReplies().length;
   return '<div class="page-head"><div><h1>Emails</h1></div>' +
     '<div class="row">' +
       (processed ? '<button class="btn ghost sm" data-act="reset">Clear everything</button>' : '') +
@@ -308,14 +394,20 @@ A.route(/^\/inbox$/, function () {
       (unread ? '<button class="btn ghost sm" data-act="runall">Read all unread (' + unread + ')</button>' : '') +
       '<button class="btn" data-act="sync"' + (A.inbox.syncing ? ' disabled' : '') + '>' + (A.inbox.syncing ? 'Syncing…' : 'Sync inbox' + (waiting.length ? ' (' + waiting.length + ' new)' : '')) + '</button>' +
     '</div></div>' +
-    '<p class="lede">Supplier replies to ' + esc(S.buyer.email) + ', in the formats they actually arrive in. Open one to watch it go through the fixed checks, the read, and what needs you.</p>' +
+    '<p class="lede">Supplier replies to ' + esc(S.buyer.email) + ', in the formats they actually arrive in. Every arrival is read automatically; open one to see the fixed checks, the read, and what needs you.</p>' +
     (A.inbox.syncing ? '<div class="syncbar" id="syncbar">' + syncbarInner() + '</div>' : '') +
+    (A.inbox.autoReadRun ? '<div class="syncbar" id="autoreadbar">' + autoReadBarInner() + '</div>' : '') +
     (!arrived.length && !A.inbox.syncing ? '<div class="empty" style="margin-bottom:16px"><b>Inbox not synced yet.</b><br><span style="font-size:12.5px">' + A.plural(waiting.length, 'email') + ' waiting on the server. Sync to pull them in.</span><br><button class="btn" style="margin-top:12px" data-act="sync">Sync inbox</button></div>' : '') +
-    (processed && !A.inbox.syncing ? '<div class="banner ok" style="margin-bottom:16px">' + A.plural(processed, 'email') + ' read · ' +
-      A.plural(A.store.quotes.length, 'quote') + ' extracted · ' + A.plural(A.openReviews().length + A.draftReplies().length, 'item') +
-      ' waiting on you <a href="#/rfqs" style="margin-left:auto">Go to the inquiries →</a></div>' : '') +
+    (processed && !A.inbox.syncing ? '<div class="banner ' + (openItems ? 'warn' : 'ok') + '" style="margin-bottom:16px">' + A.plural(processed, 'email') + ' read · ' +
+      A.plural(A.store.quotes.length, 'quote') + ' extracted · <a href="#/reviews" style="margin-left:2px">' + A.plural(openItems, 'item') + ' waiting on you →</a>' +
+      '<a href="#/rfqs" style="margin-left:auto">Go to the inquiries →</a></div>' : '') +
     '<div class="lab"><div id="inbox-list">' + inboxList() + '</div>' +
-    '<aside><div class="eyebrow" style="margin-bottom:7px">Attachment format</div><div class="filters">' +
+    '<aside>' +
+      '<div class="eyebrow" style="margin-bottom:7px">Status</div><div class="filters" style="margin-bottom:14px">' +
+      '<button data-act="lfilter" data-lf="" aria-pressed="' + (!A.labelFilter) + '">All<span class="mono">' + arrived.length + '</span></button>' +
+      '<button data-act="lfilter" data-lf="manual" aria-pressed="' + (A.labelFilter === 'manual') + '">Manual check required<span class="mono">' + labelCounts.manual + '</span></button>' +
+      '<button data-act="lfilter" data-lf="processed" aria-pressed="' + (A.labelFilter === 'processed') + '">Processed<span class="mono">' + labelCounts.processed + '</span></button></div>' +
+      '<div class="eyebrow" style="margin-bottom:7px">Attachment format</div><div class="filters">' +
       '<button data-act="filter" data-f="" aria-pressed="' + (!A.filter) + '">All formats<span class="mono">' + arrived.length + '</span></button>' +
       S.formats.map(function (f) {
         return '<button data-act="filter" data-f="' + f.key + '" aria-pressed="' + (A.filter === f.key) + '">' +
@@ -326,6 +418,14 @@ A.route(/^\/inbox$/, function () {
       '<div id="compose-slot"></div></aside></div>';
 });
 
+function autoReadBarInner() {
+  var p = A.inbox.autoReadRun || { done: 0, total: 0, label: '' };
+  var w = p.total ? Math.round(100 * p.done / p.total) : 100;
+  return '<span class="spin"></span><span>Reading ' + esc(p.label || '') + '…</span><div class="bar"><i style="width:' + w + '%"></i></div>' +
+    '<span class="mono" style="font-size:11.5px">' + p.done + ' / ' + p.total + '</span>' +
+    '<button class="btn ghost sm" data-act="pauseread" style="margin-left:8px">' + (A.inbox.paused ? 'Resume' : 'Pause') + '</button>';
+}
+
 function syncbarInner() {
   var p = A.inbox.progress || { done: 0, total: 0 };
   var w = p.total ? Math.round(100 * p.done / p.total) : 100;
@@ -334,8 +434,11 @@ function syncbarInner() {
 }
 
 function inboxList() {
-  var visible = A.arrived().filter(function (e) { return !A.filter || e.format === A.filter; })
-    .sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+  var visible = A.arrived().filter(function (e) {
+    if (A.filter && e.format !== A.filter) return false;
+    if (A.labelFilter) { var rec = A.emailById(e.id); if (!rec || rec.label !== A.labelFilter) return false; }
+    return true;
+  }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
   if (!visible.length) return A.arrived().length ? '<div class="empty">No emails in this format.</div>' : '';
   var groups = A.store.rfqs.slice().reverse().map(function (rfq) {
     var mine = visible.filter(function (e) { return e.rfq_id === rfq.id; });
@@ -354,6 +457,10 @@ function inboxList() {
   return groups;
 }
 
+var LABEL_CHIP = {
+  manual: ['chip-warn', 'Manual check required'], processed: ['chip-pass', 'Processed'],
+  non_quote: ['chip-info', 'Not a quote'], duplicate: ['chip-mute', 'Duplicate'], reading: ['chip-info', 'Reading…'], failed: ['chip-crit', 'Read failed']
+};
 function sampleCard(e) {
   var rec = A.emailById(e.id);
   var qs = rec ? A.store.quotes.filter(function (q) { return q.email_id === e.id; }) : [];
@@ -361,11 +468,16 @@ function sampleCard(e) {
   var reply = A.store.replies.filter(function (r) { return r.email_id === e.id && r.status === 'draft'; })[0];
   var cls = '', right;
   if (!rec) right = '<span class="chip chip-mute">Not read</span>';
-  else if (rec.status === 'duplicate') { cls = 'done'; right = chip('duplicate'); }
+  else if (rec.label && LABEL_CHIP[rec.label]) {
+    cls = rec.label === 'manual' ? 'attn' : rec.label === 'processed' ? 'done' : rec.label === 'failed' ? 'out' : '';
+    right = '<span class="chip ' + LABEL_CHIP[rec.label][0] + '">' + LABEL_CHIP[rec.label][1] + '</span>';
+    if (rec.kind === 'supplement') right = '<span class="chip chip-info">Supplement</span>';
+  } else if (rec.status === 'duplicate') { cls = 'done'; right = chip('duplicate'); }
   else if (rec.status === 'failed') { cls = 'out'; right = chip('failed'); }
   else if (open) { cls = 'attn'; right = '<span class="chip chip-warn">' + open + ' question' + (open > 1 ? 's' : '') + '</span>'; }
   else if (qs.length && qs[0].eligibility) { cls = qs[0].eligibility.status === 'eligible' ? 'done' : 'out'; right = chip(qs[0].eligibility.status); }
   else { cls = 'done'; right = chip(rec.status === 'non_quote' ? 'awaiting' : 'eligible'); }
+  if (rec && rec.line_coverage && rec.line_coverage.total) right += '<div class="muted" style="font-size:10.5px;margin-top:2px">' + rec.line_coverage.quoted + ' of ' + rec.line_coverage.total + ' lines</div>';
   if (reply) right += '<div style="margin-top:3px"><span class="chip chip-info" style="font-size:10px">reply drafted</span></div>';
   var arrive = A.inbox.justArrived && A.inbox.justArrived[e.id] ? ' arrive' : '';
   return '<button class="sample ' + cls + arrive + '" data-act="open" data-id="' + esc(e.id) + '">' +
@@ -530,25 +642,34 @@ A.runAll = function (ids) {
   var pool = ids ? ids.map(A.sampleById).filter(Boolean) : A.arrived();
   var pending = pool.filter(function (e) { return !A.emailById(e.id); }).sort(function (a, b) { return a.date < b.date ? -1 : 1; });
   if (!pending.length) { A.toast('Everything has been read already.'); return; }
-  A.toast('Reading ' + A.plural(pending.length, 'email') + ' one at a time…');
+  A.inbox.paused = false;
+  A.inbox.autoReadRun = { done: 0, total: pending.length, label: pending[0].label || pending[0].subject };
+  if (A.current() === '/inbox') { var bar = $('#autoreadbar'); if (!bar) A.render(); }
   var ad = A.adapters(A.aiReady ? 'ai' : 'reference', {});
-  var chain = Promise.resolve(), n = 0;
-  pending.forEach(function (e) {
-    chain = chain.then(function () {
-      return PL.processEmail(e, A.store, ad).then(function () {
-        n++; A.toast('Read ' + n + ' of ' + pending.length + ': ' + (e.label || e.subject));
-        if (A.current() === '/inbox') { var l = $('#inbox-list'); if (l) l.innerHTML = inboxList(); }
-        A.paintNav();
-      }, function () { n++; });
-    });
-  });
-  chain.then(function () {
+  var i = 0;
+  function next() {
+    if (A.inbox.paused) { setTimeout(next, 400); return; }
+    if (i >= pending.length) { return finish(); }
+    var e = pending[i];
+    A.inbox.autoReadRun.label = e.label || e.subject;
+    var b = $('#autoreadbar'); if (b) b.innerHTML = autoReadBarInner();
+    PL.processEmail(e, A.store, ad).then(function () {
+      i++; A.inbox.autoReadRun.done = i;
+      if (A.current() === '/inbox') { var l = $('#inbox-list'); if (l) l.innerHTML = inboxList(); var bb = $('#autoreadbar'); if (bb) bb.innerHTML = autoReadBarInner(); }
+      A.paintNav();
+      next();
+    }, function () { i++; A.inbox.autoReadRun.done = i; next(); });
+  }
+  function finish() {
+    A.inbox.autoReadRun = null;
     PL.rerunEvals(A.store, A.expected);
     A.persistAll();
     A.toast('All read. ' + A.plural(A.openReviews().length + A.draftReplies().length, 'item') + ' waiting on you.');
     A.render();
-  });
+  }
+  next();
 };
+A.togglePauseRead = function () { A.inbox.paused = !A.inbox.paused; var b = $('#autoreadbar'); if (b) b.innerHTML = autoReadBarInner(); };
 
 function paintRun(id) { var box = $('#run-' + id); if (box) box.innerHTML = runPanel(id); }
 
@@ -618,14 +739,18 @@ A.route(/^\/email\/(.+)$/, function (id) {
       '<dt>Date</dt><dd>' + esc(shortDate(src.date)) + '</dd>' +
       (atts.length ? '<dt>Files</dt><dd>' + atts.map(function (a, i) { return '<span class="filechip">' + esc(a.name) + '<button data-act="download" data-em="' + esc(id) + '" data-i="' + i + '">Save</button></span>'; }).join(' ') + '</dd>' : '') +
       '</dl></header>' + subtabs + panels + '</div>';
-  var readPanel = hasRead ? '<div data-epanel="read" hidden>' + (qs.length ? qs.map(function (q) { return fieldTable(q, rfq, reviews); }).join('') :
-    '<div class="card"><h3>Not a quotation</h3><p class="muted" style="font-size:12.5px;margin:6px 0 0">Read as a <b>' + esc(rec.kind) + '</b>. No prices to compare. ' + lane('ai') + '</p></div>') + '</div>' : '';
+  var multiLine = rfq && A.isMultiLine(rfq);
+  var header = multiLine && qs.length ? A.headerById(qs[0].header_id) : null;
+  var readPanel = hasRead ? '<div data-epanel="read" hidden>' + (multiLine && header ? fieldTableV2(header, qs, rfq)
+    : qs.length ? qs.map(function (q) { return fieldTable(q, rfq, reviews); }).join('')
+    : '<div class="card"><h3>Not a quotation</h3><p class="muted" style="font-size:12.5px;margin:6px 0 0">Read as a <b>' + esc(rec.kind) + '</b>. No prices to compare. ' + lane('ai') + '</p></div>') + '</div>' : '';
 
   var right;
   if (A.running[id]) right = '<div id="run-' + esc(id) + '">' + runPanel(id) + '</div>';
   else if (!rec) right = '<div class="card"><h3 style="margin-bottom:6px">Not read yet</h3>' +
     '<p class="muted" style="font-size:12.5px">Nothing has looked at this email. Read it to see the fixed checks, what Claude read, what is missing, and a reply if one is needed.</p>' +
     '<button class="btn" data-act="process" data-id="' + esc(id) + '">Read this email</button></div>';
+  else if (multiLine) right = resultPanelV2(rec, header, qs, reviews, reply, rfq);
   else right = resultPanel(rec, qs, reviews, reply, rfq);
 
   return '<div class="page-head"><div><a href="#/inbox" style="font-size:12.5px">← Emails</a>' +
@@ -670,6 +795,99 @@ function fieldTable(q, rfq, reviews) {
     }).join('') + '</tbody></table>' +
     (q.completeness != null ? '<div class="row" style="padding:10px 16px;font-size:12px"><span class="muted">Answered</span>' +
       '<div class="meter" style="flex:1;width:auto"><i style="width:' + q.completeness + '%"></i></div><span class="num">' + q.completeness + '%</span></div>' : '') + '</div>';
+}
+
+function fieldTableV2(header, qs, rfq) {
+  var n = header.norm;
+  var termRows = [
+    ['Currency', n.currency && n.currency.v, n.currency && n.currency.rule === 'human' ? 'human' : 'ai'],
+    ['Price basis', n.incoterm && n.incoterm.v ? esc(n.incoterm.v) + (n.incoterm.place ? ' ' + esc(n.incoterm.place) : '') : null, n.incoterm && n.incoterm.rule === 'human' ? 'human' : 'ai'],
+    ['Valid until', n.expiry && n.expiry.v, n.expiry && n.expiry.rule === 'human' ? 'human' : 'rule'],
+    ['Certificates', (n.certs_canon && n.certs_canon.v || []).length ? esc(n.certs_canon.v.join(' + ')) + ((n.certs_canon.unverified || []).length ? ' <span class="chip chip-warn" style="font-size:10px">' + esc(n.certs_canon.unverified.join(', ')) + ' unverified</span>' : '') : null, 'ai'],
+    ['Private label', n.private_label && n.private_label.v ? esc(n.private_label.v) + (n.private_label.condition ? ' <span class="muted">if ' + esc(n.private_label.condition) + '</span>' : '') : null, n.private_label && n.private_label.rule === 'human' ? 'human' : 'rule'],
+    ['Payment', n.payment ? esc(n.payment.terms || n.payment) : null, 'ai'],
+    ['Sample', n.sample ? esc(JSON.stringify(n.sample).replace(/[{}"]/g, '').replace(/,/g, ', ')) : null, 'ai']
+  ];
+  (header.custom || []).forEach(function (c) {
+    var cq = (rfq.custom_questions || []).filter(function (x) { return x.qid === c.qid; })[0];
+    termRows.push([cq ? cq.text : c.qid, c.v, 'ai']);
+  });
+  (rfq.custom_questions || []).forEach(function (cq) {
+    if ((header.custom || []).some(function (c) { return c.qid === cq.qid; })) return;
+    termRows.push([cq.text, null, 'ai']);
+  });
+
+  var sorted = qs.slice().sort(function (a, b) { return (a.line || 0) - (b.line || 0); });
+  var lineRows = sorted.map(function (q) {
+    var miss = q.not_quoted || (q.gaps || []).length;
+    var priceCell = q.not_quoted ? '<span class="muted">not quoted</span>' :
+      q.norm.usd_at_target && q.norm.usd_at_target.v != null ? '<span class="num">' + money(q.norm.usd_at_target.v) + '</span>' : '<span class="muted">missing</span>';
+    var moqCell = q.norm.moq_pcs && q.norm.moq_pcs.v != null ? n0(q.norm.moq_pcs.v) : '<span class="muted">—</span>';
+    var leadCell = q.norm.lead_days && q.norm.lead_days.v != null ? q.norm.lead_days.v + 'd' : '<span class="muted">—</span>';
+    var statusChipHtml = chip(q.eligibility ? q.eligibility.status : 'parked');
+    return '<tr class="' + (miss ? 'miss' : '') + '"><td>' + q.line + '</td><td class="mono">' + esc(q.sku || '') + '</td><td>' + esc(q.product) + '</td>' +
+      '<td>' + priceCell + '</td><td>' + moqCell + '</td><td>' + leadCell + '</td><td>' + statusChipHtml + '</td></tr>';
+  }).join('');
+
+  return '<div class="card" style="padding:0;overflow:hidden;margin-bottom:12px">' +
+    '<div class="spread" style="padding:12px 16px 8px"><div><h3>' + esc(qs[0].supplier_name) + '</h3><div class="muted" style="font-size:12px">' + qs.length + ' line(s)</div></div>' +
+    '<a class="btn ghost sm" href="#/quotations/' + esc(rfq.id) + '" style="text-decoration:none">Open in Quotations →</a></div>' +
+    '<div class="eyebrow" style="padding:0 16px 4px">Terms (apply to every line)</div>' +
+    '<table class="fieldtable"><tbody>' + termRows.map(function (r) {
+      return '<tr' + (r[1] == null ? ' class="miss"' : '') + '><td>' + esc(r[0]) + '</td>' +
+        '<td>' + (r[1] == null ? '<span style="font-weight:600">Not answered</span>' : r[1]) + '</td>' +
+        '<td style="text-align:right;width:70px">' + (r[1] == null ? '' : lane(r[2])) + '</td></tr>';
+    }).join('') + '</tbody></table>' +
+    '<div class="eyebrow" style="padding:12px 16px 4px">Lines</div>' +
+    '<div class="scroll-x"><table class="matrix" style="font-size:12px"><thead><tr><th>Line</th><th>SKU</th><th>Product</th><th>Price</th><th>MOQ</th><th>Lead</th><th>Status</th></tr></thead><tbody>' + lineRows + '</tbody></table></div>' +
+    '</div>';
+}
+
+function missingCardV2(header, qs, headerReviews) {
+  var openHeader = headerReviews.filter(function (r) { return r.status === 'open' && !r.lines; });
+  var openLines = headerReviews.filter(function (r) { return r.status === 'open' && r.lines; });
+  var notQuoted = qs.filter(function (q) { return q.not_quoted; });
+  var withGaps = qs.filter(function (q) { return !q.not_quoted && (q.gaps || []).length; });
+  var total = openHeader.length + openLines.length + notQuoted.length;
+  if (!total && !withGaps.length) return '<div class="card"><div class="spread"><div class="eyebrow">What\'s missing</div><span class="chip chip-pass">nothing</span></div>' +
+    '<p style="font-size:12.5px;margin:6px 0 0">Every line and every term was answered and nothing needs a person. ' + lane('rule') + '</p></div>';
+  return '<div class="card missing-card"><div class="spread" style="margin-bottom:8px"><div><div class="eyebrow">What\'s missing</div><h3>' + esc(qs[0].supplier_name) + '</h3></div>' +
+    '<span class="chip chip-warn">' + (total || withGaps.length) + ' item' + ((total || withGaps.length) > 1 ? 's' : '') + '</span></div>' +
+    openHeader.map(reviewMini).join('') +
+    openLines.map(function (r) {
+      var lines = r.lines.filter(function (l) { return l.status === 'open'; }).map(function (l) { return l.line; });
+      return '<div class="mrow" style="background:' + (r.severity === 'crit' ? 'var(--mark-crit)' : 'var(--mark)') + '"><i style="font-style:normal;color:' + (r.severity === 'crit' ? 'var(--crit)' : 'var(--warn)') + ';font-weight:700">!</i>' +
+        '<div><b style="font-weight:600">' + esc(r.question) + '</b> <span class="tag">line' + (lines.length > 1 ? 's' : '') + ' ' + lines.join(', ') + '</span> ' + lane(r.raised_by === 'ai' ? 'ai' : 'rule') +
+        (r.note ? '<div class="muted" style="font-size:12px">' + esc(r.note) + '</div>' : '') + '</div></div>';
+    }).join('') +
+    (notQuoted.length ? '<div class="mrow"><i style="font-style:normal;color:var(--warn);font-weight:700">○</i><div><b style="font-weight:600">Lines not quoted</b>' +
+      '<div class="muted" style="font-size:12px">' + notQuoted.map(function (q) { return q.sku; }).join(', ') + '</div></div></div>' : '') +
+    (openHeader.length || openLines.length ? '<a class="btn ghost sm" style="margin-top:6px;display:inline-block;text-decoration:none" href="#/reviews">Answer these →</a>' : '') +
+    '</div>';
+}
+
+function resultPanelV2(rec, header, qs, reviews, reply, rfq) {
+  var out = [];
+  if (rec.status === 'failed') out.push('<div class="card"><h3>The read failed</h3><p class="muted" style="font-size:12.5px">' + esc(rec.error || '') + '</p></div>');
+  if (header) out.push(missingCardV2(header, qs, reviews));
+  else if (rec.kind === 'clarification' || rec.status === 'non_quote') {
+    out.push('<div class="card missing-card"><div class="spread" style="margin-bottom:6px"><div class="eyebrow">What\'s missing</div><span class="chip chip-info">not a quote</span></div>' +
+      '<p style="font-size:12.5px;margin:0 0 6px">The supplier sent a <b>' + esc(rec.kind) + '</b>, not prices.</p>' +
+      reviews.filter(function (r) { return r.status === 'open'; }).map(reviewMini).join('') + '</div>');
+  } else if (rec.supplement !== undefined || rec.kind === 'supplement') {
+    out.push('<div class="card"><div class="eyebrow" style="margin-bottom:6px">Follow-up answer</div>' +
+      '<p style="font-size:12.5px;margin:0">' + (rec.answered_summary && rec.answered_summary.length ? 'Filled ' + rec.answered_summary.join(', ') + '.' : 'Nothing new was answered.') + ' ' + lane('rule') + '</p></div>');
+  }
+  out.push(replyCard(reply, rec, qs));
+  var codeDec = rec.match || {};
+  out.push('<div class="card"><div class="eyebrow" style="margin-bottom:8px">How it was routed</div><div class="checklist">' +
+    row('Inquiry', codeDec.code ? esc(codeDec.code) + ' <span class="muted">(' + esc(codeDec.how) + ', ' + pct(codeDec.c || 0) + ')</span>' : 'none found',
+      codeDec.c >= 0.9 ? 'pass' : codeDec.code ? 'warn' : 'crit', codeDec.lane || 'rule') +
+    row('Read by', rec.source === 'ai' ? 'Claude' + (rec.model_tier ? ', ' + rec.model_tier + ' model' : '') : 'stored reference read', rec.source === 'ai' ? 'pass' : 'warn', rec.source === 'ai' ? 'ai' : 'rule') +
+    (rec.line_coverage ? row('Lines quoted', rec.line_coverage.quoted + ' of ' + (rec.line_coverage.total || rec.line_coverage.quoted), 'pass', 'rule') : '') +
+    (rec.prompt_bytes ? row('Sent to the reader', rec.prompt_bytes.toLocaleString() + ' bytes of 60,000' + (rec.duration_ms ? ' · ' + (rec.duration_ms / 1000).toFixed(1) + ' s' : ''), 'pass', 'rule') : '') +
+    '</div></div>');
+  return out.join('');
 }
 
 function resultPanel(rec, qs, reviews, reply, rfq) {
@@ -753,9 +971,11 @@ function replyCard(reply, rec, qs) {
 A.draftReplyFor = function (emailId) {
   var rec = A.emailById(emailId); if (!rec) return;
   var rfq = A.rfqById(rec.rfq_id); if (!rfq) { A.toast('This email is not linked to an inquiry yet.'); return; }
-  var q = A.store.quotes.filter(function (x) { return x.email_id === emailId && x.rfq_id === rfq.id; })[0] || null;
+  var multiLine = A.isMultiLine(rfq);
+  var qsAll = A.store.quotes.filter(function (x) { return x.email_id === emailId && x.rfq_id === rfq.id; });
+  var q = qsAll[0] || null;
   var gates = A.store.reviews.filter(function (rv) { return rv.email_id === emailId && rv.status === 'open'; });
-  var items = G.chaseItems(q, gates, rfq);
+  var items = multiLine ? G.chaseItemsV2(qsAll, gates.filter(function (g) { return !g.lines; }), rfq) : G.chaseItems(q, gates, rfq);
   if (!items.length && rec.kind !== 'clarification') { A.toast('Nothing to chase on this quote.'); return; }
   A.toast('Drafting…');
   A.adapters(A.aiReady ? 'ai' : 'reference', {}).reply(rec, q, rfq, items).then(function (d) {
@@ -1030,16 +1250,19 @@ function reviewCard(r) {
   var q = r.quote_id ? A.store.quotes.filter(function (x) { return x.id === r.quote_id; })[0] : null;
   var rfq = r.rfq_id ? A.rfqById(r.rfq_id) : null;
   var reason = R.REASONS[r.code] || {};
-  var editable = { CURRENCY_CONVERTED: 'usd_at_target', INCOTERM_MISMATCH: 'usd_at_target', UNIT_CONVERTED: 'usd_at_target',
+  var headerOnly = !!(r.header_id && !r.quote_id && !r.lines); /* v2 term-level review: no single price/value to correct */
+  var editable = headerOnly ? null : { CURRENCY_CONVERTED: 'usd_at_target', INCOTERM_MISMATCH: 'usd_at_target', UNIT_CONVERTED: 'usd_at_target',
     TIER_INTERPOLATED: 'usd_at_target', PRICE_RANGE_ONLY: 'usd_at_target', OCR_AMBIGUOUS_CRITICAL: 'usd_at_target',
     CRITICAL_FIELD_LOW_CONF: 'usd_at_target', PRICE_OUTLIER: 'usd_at_target', MOQ_EXCEEDS_TARGET: 'moq_pcs',
     CONDITIONAL_PL: 'private_label', CERT_UNVERIFIED: 'certs_canon', VALIDITY_EXPIRED: 'expiry' }[r.code];
   var open = r.status === 'open';
+  var affectedLines = r.lines ? uniqLines(r.lines.map(function (l) { return l.line; })) : null;
   return '<div class="review ' + (r.severity === 'crit' ? 'crit' : '') + (open ? '' : ' done') + '">' +
     '<div class="row" style="justify-content:space-between">' +
       '<div class="row" style="gap:6px">' +
         '<span class="chip chip-' + (r.severity === 'crit' ? 'crit' : r.severity === 'info' ? 'info' : 'warn') + '">' + esc(r.code.replace(/_/g, ' ').toLowerCase()) + '</span>' +
         (rfq ? '<span class="tag">' + esc(rfq.code) + '</span>' : '') +
+        (affectedLines ? '<span class="tag">line' + (affectedLines.length > 1 ? 's' : '') + ' ' + affectedLines.join(', ') + '</span>' : '') +
         (q ? '<span class="muted" style="font-size:12px">' + esc(q.supplier_name) + '</span>' : '') +
         (r.email_id ? '<a href="#/email/' + esc(r.email_id) + '" style="font-size:12px">open email</a>' : '') +
       '</div><div class="row" style="gap:5px">' + lane(r.raised_by === 'ai' ? 'ai' : 'rule') + '→' + lane('human') + '</div></div>' +
@@ -1115,6 +1338,279 @@ A.route(/^\/guardrails$/, function () {
         '<td style="color:' + col + ';font-weight:600">' + esc(r.sev) + '</td><td>' + esc(r.q) + '</td></tr>';
     }).join('') + '</tbody></table></div>';
 });
+
+/* ===================== supplier view ===================== */
+A.route(/^\/supplier$/, function () {
+  return '<div class="page-head"><h1>Supplier view</h1></div>' +
+    '<p class="lede">The simulated supplier side. Pick an inquiry, then compose a reply as each recipient — complete, partial, contradictory, or from an address we never sent to. Nothing here calls Claude; every reply is written instantly so the demo never waits.</p>' +
+    '<div class="stack">' + A.store.rfqs.slice().reverse().map(function (rfq) {
+      var tabs = A.supplierTabs(rfq);
+      return '<div class="card"><div class="spread" style="margin-bottom:6px"><div><h3>' + esc(rfq.product) + '</h3><div class="muted" style="font-size:12px"><span class="tag">' + esc(rfq.code) + '</span> ' + rfqMeta(rfq) + '</div></div>' +
+        '<button class="btn ghost sm" data-act="sv-loadall" data-rfq="' + rfq.id + '">Load all four</button></div>' +
+        '<div class="row" style="gap:6px">' + tabs.map(function (t) {
+          return '<a class="btn ghost sm" href="#/supplier/' + rfq.id + '/' + t.key + '" style="text-decoration:none">' + t.key + ' · ' + esc(t.supplier.name) + '</a>';
+        }).join('') + '</div></div>';
+    }).join('') + '</div>';
+});
+
+A.route(/^\/supplier\/([^/]+)\/([^/]+)$/, function (rfqId, tabKey) {
+  var rfq = A.rfqById(rfqId);
+  if (!rfq) return '<div class="empty">No such inquiry.</div>';
+  var tabs = A.supplierTabs(rfq);
+  var current = tabs.filter(function (t) { return t.key === tabKey; })[0] || tabs[0];
+  var supplier = current.supplier;
+  var sv = A.svGet(rfqId, supplier.id, current.key);
+  var pvKey = A.svKey(rfqId, supplier.id);
+  var pv = A.svPreview[pvKey];
+
+  var head = '<div class="page-head"><div><a href="#/supplier" style="font-size:12.5px">← Supplier view</a>' +
+    '<h1 style="margin-top:3px">' + esc(rfq.product) + '</h1><div class="muted" style="font-size:12.5px"><span class="tag">' + esc(rfq.code) + '</span></div></div>' +
+    '<button class="btn ghost sm" data-act="sv-loadall" data-rfq="' + rfqId + '">Load all four</button></div>' +
+    '<div class="svtabs">' + tabs.map(function (t) {
+      return '<a class="' + (t.key === current.key ? 'on' : '') + '" href="#/supplier/' + rfqId + '/' + t.key + '">' + t.key + ' · ' + esc(t.supplier.name) + '</a>';
+    }).join('') + '</div>';
+
+  var left = svInbound(rfq, supplier);
+  var right = svComposer(rfq, supplier, current, sv, pv);
+  return head + '<div class="wizard">' + left + right + '</div>';
+});
+
+function svInbound(rfq, supplier) {
+  var items = R.rfqItems(rfq);
+  var chases = A.store.replies.filter(function (r) { return r.rfq_id === rfq.id && r.supplier_id === supplier.id; });
+  return '<div class="card"><div class="eyebrow" style="margin-bottom:6px">Inbound request, as ' + esc(supplier.unknown ? 'an outside supplier' : supplier.name) + ' would see it</div>' +
+    '<div class="envelope" style="margin-bottom:12px"><header><b style="font-family:var(--disp);font-size:15px">Re: ' + esc(rfq.code) + ' — ' + esc(rfq.product) + '</b>' +
+    '<dl class="meta"><dt>From</dt><dd>' + esc(S.buyer.name) + ' &lt;' + esc(S.buyer.email) + '&gt;</dd><dt>Deadline</dt><dd>' + esc(rfq.deadline) + '</dd></dl></header>' +
+    '<div class="bodytext" style="font-size:12.5px">' + esc(rfq.spec_summary) + '\n\nCertifications required: ' + esc((rfq.required_certs || []).join(', ') || 'none') +
+    '\nPrivate label: ' + (rfq.pl_required ? 'required' : 'not required') + '\nLead time: up to ' + rfq.max_lead_days + ' days\nDestination: ' + esc(rfq.dest_port) + '</div></div>' +
+    '<div class="scroll-x" style="max-height:260px;overflow-y:auto"><table class="matrix" style="font-size:11.5px"><thead><tr><th>Line</th><th>SKU</th><th>Product</th><th>Qty</th><th>Band</th></tr></thead><tbody>' +
+    items.map(function (it) { return '<tr><td>' + it.line + '</td><td class="mono">' + esc(it.sku) + '</td><td>' + esc(it.product) + '</td><td>' + n0(it.qty) + ' ' + esc(it.unit) + '</td><td>' + it.target_usd_fob.lo.toFixed(2) + '–' + it.target_usd_fob.hi.toFixed(2) + '</td></tr>'; }).join('') +
+    '</tbody></table></div>' +
+    '<div class="eyebrow" style="margin:12px 0 5px">Questions asked</div><ol style="margin:0;padding-left:18px;font-size:12.5px">' +
+    (rfq.custom_questions || []).map(function (q) { return '<li>' + esc(q.text) + '</li>'; }).join('') + '</ol>' +
+    (chases.length ? '<div class="hr"></div><div class="eyebrow" style="margin-bottom:5px">Follow-ups from the buyer</div>' + chases.map(function (rp) {
+      return '<div class="mrow" style="background:var(--sunk)"><i style="font-style:normal">✉</i><div><b style="font-weight:600">' + esc(rp.subject) + '</b> <span class="chip ' + (rp.status === 'sent' ? 'chip-info' : 'chip-mute') + '" style="font-size:10px">' + esc(rp.status) + '</span>' +
+        (rp.status === 'sent' ? '<div style="margin-top:5px"><button class="btn ghost sm" data-act="sv-answer" data-rp="' + esc(rp.id) + '">Reply as ' + esc(current_persona_label(A.svGet(rfq.id, supplier.id).persona)) + '</button></div>' : '') +
+        '</div></div>';
+    }).join('') : '') +
+    '</div>';
+}
+function current_persona_label(k) { return (G.PERSONAS[k] || G.PERSONAS.A).label; }
+
+function svComposer(rfq, supplier, current, sv, pv) {
+  var personaBtns = Object.keys(G.PERSONAS).map(function (k) {
+    return '<button type="button" data-act="sv-persona" data-p="' + k + '" aria-pressed="' + (sv.persona === k) + '">' + k + ' · ' + esc(G.PERSONAS[k].label) + '</button>';
+  }).join('');
+  var toggles = G.TOGGLE_LIST.map(function (t) {
+    return '<label class="row" style="gap:6px;font-size:12px;font-weight:400"><input type="checkbox" data-change="sv-toggle" data-k="' + t.key + '"' + (sv.toggles[t.key] ? ' checked' : '') + ' style="width:auto"> ' + esc(t.label) + '</label>';
+  }).join('');
+  var formatSel = '<select id="sv-format">' + G.FORMATS_V2.map(function (f) { return '<option value="' + f + '"' + (sv.format === f ? ' selected' : '') + '>' + f + '</option>'; }).join('') + '</select>';
+
+  var preview = '';
+  if (pv) {
+    preview = '<div class="hr"></div><div class="eyebrow" style="margin-bottom:6px">Preview — edit before sending</div>' +
+      '<label class="f">Subject<input type="text" id="sv-subject" value="' + esc(pv.email.subject) + '"></label>' +
+      '<label class="f">From<input type="text" id="sv-from" value="' + esc(pv.email.from) + '"></label>' +
+      '<label class="f">Body<textarea id="sv-body" rows="8" style="font-family:var(--sans);font-size:12.5px">' + esc(pv.email.body_raw) + '</textarea></label>' +
+      (pv.email.attachments.length ? '<label class="f">Attachment (' + esc(pv.email.attachments[0].name) + ')<textarea id="sv-att" rows="8" style="font-family:var(--mono);font-size:11.5px">' + esc(pv.email.attachments[0].transcript) + '</textarea></label>' : '') +
+      '<div class="muted" style="font-size:11px">' + pv.ref.lines.length + ' line(s) quoted of ' + R.rfqItems(rfq).length + '. Edits are kept, but changed text may read as lower confidence in reference mode.</div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn" data-act="sv-send">Send to buyer</button><button class="btn ghost sm" data-act="sv-discard">Discard</button></div>';
+  }
+
+  return '<div class="card"><div class="eyebrow" style="margin-bottom:6px">Compose a quotation, as ' + esc(supplier.unknown ? 'an outside supplier' : supplier.name) + '</div>' +
+    '<div class="eyebrow" style="margin:6px 0 4px">Persona</div><div class="chips">' + personaBtns + '</div>' +
+    '<div class="eyebrow" style="margin:10px 0 4px">Edge cases to plant</div><div class="stack" style="gap:3px">' + toggles + '</div>' +
+    '<div class="row" style="margin-top:10px;gap:10px"><label class="f" style="flex:none"><span style="font-size:11px">Format</span>' + formatSel + '</label>' +
+    '<button class="btn" data-act="sv-generate" style="align-self:flex-end">Generate</button></div>' +
+    preview + '</div>';
+}
+
+A.svGenerate = function () {
+  var m = /\/supplier\/([^/]+)\/([^/]+)/.exec(A.current()); if (!m) return;
+  var rfq = A.rfqById(m[1]); var tabs = A.supplierTabs(rfq); var current = tabs.filter(function (t) { return t.key === m[2]; })[0] || tabs[0];
+  var sv = A.svGet(rfq.id, current.supplier.id, current.key);
+  var fmt = $('#sv-format') ? $('#sv-format').value : sv.format;
+  var out = G.compose(rfq, current.supplier, sv.persona, sv.toggles, fmt, A.store.meta, S.buyer);
+  A.svPreview[A.svKey(rfq.id, current.supplier.id)] = out;
+  A.render();
+};
+A.svSend = function () {
+  var m = /\/supplier\/([^/]+)\/([^/]+)/.exec(A.current()); if (!m) return;
+  var rfq = A.rfqById(m[1]); var tabs = A.supplierTabs(rfq); var current = tabs.filter(function (t) { return t.key === m[2]; })[0] || tabs[0];
+  var key = A.svKey(rfq.id, current.supplier.id);
+  var pv = A.svPreview[key]; if (!pv) return;
+  pv.email.subject = $('#sv-subject') ? $('#sv-subject').value : pv.email.subject;
+  pv.email.from = $('#sv-from') ? $('#sv-from').value : pv.email.from;
+  pv.email.body_raw = $('#sv-body') ? $('#sv-body').value : pv.email.body_raw;
+  if (pv.email.attachments.length && $('#sv-att')) pv.email.attachments[0].transcript = $('#sv-att').value;
+  pv.email.ref = pv.ref; pv.email.date = new Date().toISOString();
+  A.composed.push(pv.email);
+  delete A.svPreview[key];
+  A.persistAll();
+  A.toast('Sent to ' + S.buyer.name + '. Sync the inbox to receive it.');
+  A.render();
+};
+A.svDiscard = function () {
+  var m = /\/supplier\/([^/]+)\/([^/]+)/.exec(A.current()); if (!m) return;
+  var rfq = A.rfqById(m[1]); var tabs = A.supplierTabs(rfq); var current = tabs.filter(function (t) { return t.key === m[2]; })[0] || tabs[0];
+  delete A.svPreview[A.svKey(rfq.id, current.supplier.id)];
+  A.render();
+};
+A.svLoadAll = function (rfqId) {
+  var rfq = A.rfqById(rfqId); if (!rfq) return;
+  var tabs = A.supplierTabs(rfq);
+  tabs.forEach(function (t) {
+    var sv = A.svGet(rfqId, t.supplier.id, t.key);
+    var out = G.compose(rfq, t.supplier, sv.persona, sv.toggles, sv.format, A.store.meta, S.buyer);
+    out.email.ref = out.ref;
+    A.composed.push(out.email);
+  });
+  A.persistAll();
+  A.toast('Four supplier replies written for ' + rfq.code + '. Sync the inbox to receive them.');
+  A.render();
+};
+A.svAnswerFollowUp = function (replyId) {
+  var rp = A.store.replies.filter(function (r) { return r.id === replyId; })[0]; if (!rp) return;
+  var rfq = A.rfqById(rp.rfq_id); if (!rfq) return;
+  var sv = A.svGet(rfq.id, rp.supplier_id);
+  var supplier = A.supById(rp.supplier_id) || { id: rp.supplier_id, name: rp.supplier_name };
+  var out = G.answerFollowUp(rfq, supplier, sv.persona, rp, A.store.meta, S.buyer);
+  if (!out) { A.toast(current_persona_label(sv.persona) + ' does not reply to this follow-up.'); return; }
+  out.email.ref = out.ref;
+  A.composed.push(out.email);
+  A.persistAll();
+  A.toast('Follow-up written. Sync the inbox to receive it.');
+  A.render();
+};
+
+/* ===================== quotations ===================== */
+A.route(/^\/quotations$/, function () {
+  var multi = A.store.rfqs.filter(function (r) { return A.isMultiLine(r); });
+  return '<div class="page-head"><h1>Quotations</h1></div>' +
+    '<p class="lede">Every line against every supplier. Chase what is missing, get the AI\'s best-value pick alongside the cheapest, and award per line.</p>' +
+    (multi.length ? '<div class="stack">' + multi.map(function (rfq) {
+      return '<div class="card"><div class="spread"><div><h3>' + esc(rfq.product) + '</h3><div class="muted" style="font-size:12px"><span class="tag">' + esc(rfq.code) + '</span> ' + rfqMeta(rfq) + '</div></div>' +
+        '<a class="btn" href="#/quotations/' + rfq.id + '" style="text-decoration:none">Open</a></div></div>';
+    }).join('') + '</div>' : '<div class="empty">No multi-line inquiries yet.</div>');
+});
+
+A.route(/^\/quotations\/(.+)$/, function (rfqId) {
+  var rfq = A.rfqById(rfqId);
+  if (!rfq) return '<div class="empty">No such inquiry.</div>';
+  var res = PL.refreshEligibility(A.store, rfqId);
+  var perLine = (res.perLine || []).filter(function (pl) { return pl.item; }).sort(function (a, b) { return a.item.line - b.item.line; });
+  var headers = A.store.quote_headers.filter(function (h) { return h.rfq_id === rfqId; });
+  var supplierIds = []; headers.forEach(function (h) { if (supplierIds.indexOf(h.supplier_id) === -1) supplierIds.push(h.supplier_id); });
+  var supplierOf = function (id) { return A.supById(id) || { id: id, name: id || 'Unknown sender', unknown: !id }; };
+  var awardsSug = A.awardsCache && A.awardsCache[rfqId];
+  var awarded = A.store.awards[rfqId] || { lines: {} };
+
+  var totalLines = R.rfqItems(rfq).length;
+  var linesWithData = perLine.filter(function (pl) { return pl.quotes.some(function (q) { return !q.not_quoted; }); }).length;
+  var eligibleLines = perLine.filter(function (pl) { return pl.eligible.length > 0; }).length;
+  var awardedLines = Object.keys(awarded.lines).length;
+
+  var head = '<div class="page-head"><div><a href="#/rfq/' + esc(rfqId) + '" style="font-size:12.5px">← ' + esc(rfq.code) + '</a>' +
+    '<h1 style="margin-top:3px">Quotations · ' + esc(rfq.product) + '</h1></div>' +
+    '<div class="row"><button class="btn" data-act="suggest-awards" data-rfq="' + esc(rfqId) + '"' + (A.running['aw_' + rfqId] ? ' disabled' : '') + '>' + (A.running['aw_' + rfqId] ? 'Working…' : awardsSug ? 'Run again' : 'Suggest awards') + '</button></div></div>' +
+    '<div class="row" style="gap:6px;margin-bottom:14px;font-size:12px">' +
+      '<span class="chip chip-mute">' + totalLines + ' lines</span>' +
+      '<span class="chip chip-mute">' + linesWithData + ' with a reply</span>' +
+      '<span class="chip ' + (eligibleLines ? 'chip-pass' : 'chip-mute') + '">' + eligibleLines + ' with an eligible quote</span>' +
+      '<span class="chip ' + (awardedLines ? 'chip-info' : 'chip-mute') + '">' + awardedLines + ' of ' + totalLines + ' awarded</span></div>';
+
+  if (A.running['aw_' + rfqId]) {
+    var run = A.running['aw_' + rfqId];
+    return head + '<div class="card"><div class="row"><span class="spin"></span><span class="chip chip-info">Claude is ranking the contested lines</span></div>' +
+      (run.text ? '<pre class="reply-box" style="margin-top:10px;max-height:220px;font-size:11px">' + esc(run.text.slice(-2000)) + '</pre>' : '') + '</div>';
+  }
+
+  var matrix = quotationsMatrix(rfq, perLine, headers, supplierIds, supplierOf, awardsSug, awarded);
+  var summary = awardsSug ? awardsSummary(rfq, perLine, awardsSug, supplierOf) : '';
+  return head + matrix + summary;
+});
+
+function quotationsMatrix(rfq, perLine, headers, supplierIds, supplierOf, awardsSug, awarded) {
+  if (!supplierIds.length) return '<div class="empty">No supplier replies yet. <a href="#/supplier/' + esc(rfq.id) + '/A">Compose one in Supplier view</a>.</div>';
+  var cols = supplierIds.map(supplierOf);
+  var byLineSupplier = {};
+  perLine.forEach(function (pl) {
+    pl.quotes.forEach(function (q) { byLineSupplier[pl.item.line + ':' + q.supplier_id] = q; });
+  });
+  function cell(q) {
+    if (!q) return '<td><span class="muted">—</span></td>';
+    if (q.not_quoted) return '<td><span class="muted" title="Not quoted by this supplier">not quoted</span></td>';
+    var n = q.norm;
+    var price = n.usd_at_target && n.usd_at_target.v != null ? money(n.usd_at_target.v) : '<span class="muted">no price</span>';
+    var badges = [];
+    if ((q.gaps || []).some(function (g) { return g.field === 'price' && g.kind === 'partial'; })) badges.push('range');
+    if (n.moq_pcs && n.moq_pcs.v == null) badges.push('MOQ?');
+    var st = q.eligibility ? q.eligibility.status : 'parked';
+    if (st === 'needs_review') badges.push('review');
+    else if (st === 'disqualified') badges.push('disqualified');
+    var filled = q.filled && (q.filled.price || q.filled.moq) ? ' title="Filled from a follow-up"' : '';
+    return '<td' + filled + ' class="' + (st === 'disqualified' ? 'muted' : '') + '"><span class="num">' + price + '</span>' +
+      (badges.length ? '<div class="row" style="gap:3px;margin-top:2px">' + badges.map(function (b) { return '<span class="tag" style="font-size:9.5px">' + b + '</span>'; }).join('') + '</div>' : '') +
+      (st !== 'disqualified' && st !== 'not_quoted' ? '<button class="btn ghost sm" style="margin-top:3px;padding:1px 6px;font-size:10px" data-act="ask-line" data-rfq="' + esc(rfq.id) + '" data-sup="' + esc(q.supplier_id) + '" data-line="' + q.line + '">Ask</button>' : '') + '</td>';
+  }
+  return '<div class="card scroll-x"><table class="qtable" style="min-width:' + (280 + cols.length * 170) + 'px"><thead><tr><th style="position:sticky;left:0;background:var(--surface)">Line</th>' +
+    cols.map(function (s) { return '<th>' + esc(s.name.split(' ').slice(0, 2).join(' ')) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+    perLine.map(function (pl) {
+      var it = pl.item;
+      var awardEntry = awarded.lines[it.line];
+      var sug = awardsSug && awardsSug.lines[it.line];
+      return '<tr><td style="position:sticky;left:0;background:var(--surface)"><b>' + it.line + '</b> <span class="mono muted" style="font-size:10.5px">' + esc(it.sku) + '</span>' +
+        '<div class="muted" style="font-size:11px">' + esc(it.product) + '</div><div class="muted" style="font-size:10.5px">' + n0(it.qty) + ' ' + esc(it.unit) + ' · ' + it.target_usd_fob.lo.toFixed(2) + '–' + it.target_usd_fob.hi.toFixed(2) + '</div>' +
+        (pl.cheapest ? '<div style="font-size:10.5px;margin-top:3px">cheapest: ' + esc((supplierOf(pl.cheapest.supplier_id) || {}).name || '').split(' ')[0] + '</div>' : '') +
+        (awardEntry ? '<div class="chip chip-pass" style="font-size:9.5px;margin-top:3px">awarded</div>' : sug ? '<select data-change="award-pick" data-rfq="' + esc(rfq.id) + '" data-line="' + it.line + '" style="margin-top:4px;font-size:10.5px;padding:1px 4px">' +
+          '<option value="">choose…</option>' + pl.eligible.map(function (q) { return '<option value="' + q.id + '">' + esc((supplierOf(q.supplier_id) || {}).name || '').split(' ')[0] + '</option>'; }).join('') + '</select>' : '') + '</td>' +
+        cols.map(function (s) { return cell(byLineSupplier[it.line + ':' + s.id]); }).join('') + '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function awardsSummary(rfq, perLine, awardsSug, supplierOf) {
+  var bySupplier = {};
+  perLine.forEach(function (pl) {
+    var s = awardsSug.lines[pl.item.line];
+    if (!s) return;
+    [['cheapest_id', 'cheapest'], ['best_value_id', 'best_value']].forEach(function (pair) {
+      var qid = s[pair[0]]; if (!qid) return;
+      var q = pl.quotes.filter(function (x) { return x.id === qid; })[0]; if (!q) return;
+      var key = q.supplier_id + ':' + pair[1];
+      bySupplier[key] = bySupplier[key] || { supplier: supplierOf(q.supplier_id), lens: pair[1], lines: 0, total: 0 };
+      bySupplier[key].lines++; bySupplier[key].total += (q.norm.usd_at_target.v || 0) * pl.item.qty;
+    });
+  });
+  var rows = Object.keys(bySupplier).map(function (k) { return bySupplier[k]; });
+  return '<div class="card" style="margin-top:14px"><div class="spread" style="margin-bottom:8px"><div><div class="eyebrow">Award summary</div><h3>Lines and total per supplier, by lens</h3></div>' +
+    '<div class="row"><button class="btn ghost sm" data-act="award-bulk" data-rfq="' + esc(rfq.id) + '" data-lens="cheapest">Award all Cheapest</button>' +
+    '<button class="btn" data-act="award-bulk" data-rfq="' + esc(rfq.id) + '" data-lens="best_value">Award all Best value</button></div></div>' +
+    '<div class="scroll-x"><table class="matrix"><thead><tr><th>Supplier</th><th>Lens</th><th>Lines</th><th>Total (covered lines)</th></tr></thead><tbody>' +
+    rows.map(function (r) { return '<tr><td>' + esc(r.supplier.name) + '</td><td>' + lane(r.lens === 'cheapest' ? 'rule' : 'ai') + ' ' + (r.lens === 'cheapest' ? 'Cheapest' : 'Best value') + '</td><td>' + r.lines + '</td><td class="num">USD ' + r.total.toLocaleString(undefined, { maximumFractionDigits: 0 }) + '</td></tr>'; }).join('') +
+    '</tbody></table></div>' +
+    (awardsSug.questions_for_buyer && awardsSug.questions_for_buyer.length ? '<div class="hr"></div><div class="eyebrow" style="margin-bottom:4px">Questions back to us</div><ul style="margin:0;padding-left:16px;font-size:12.5px">' + awardsSug.questions_for_buyer.map(function (q) { return '<li>' + esc(q) + '</li>'; }).join('') + '</ul>' : '') +
+    '</div>';
+}
+
+A.suggestAwards = function (rfqId) {
+  A.running['aw_' + rfqId] = { text: '' };
+  A.render();
+  var ad = A.adapters(A.aiReady ? 'ai' : 'reference', { onText: function (u) { A.running['aw_' + rfqId].text = u.text; var b = $('#view pre'); if (b) b.textContent = u.text.slice(-2000); } });
+  PL.suggestAwards(A.store, rfqId, ad).then(function (res) {
+    delete A.running['aw_' + rfqId];
+    A.awardsCache = A.awardsCache || {}; A.awardsCache[rfqId] = res;
+    A.persistAll(); A.render();
+  }, function () { delete A.running['aw_' + rfqId]; A.render(); });
+};
+A.askLine = function (rfqId, supplierId, line) {
+  var ad = A.adapters(A.aiReady ? 'ai' : 'reference', {});
+  PL.draftLineChase(A.store, rfqId, supplierId, [line], ad).then(function (rp) {
+    if (!rp) { A.toast('Nothing to chase on this line.'); return; }
+    A.persistAll();
+    A.toast('Chase drafted for line ' + line + '. Approve it in Your queue → #/reviews.');
+    A.render();
+  });
+};
 
 /* ===================== events ===================== */
 document.addEventListener('click', function (ev) {
@@ -1248,12 +1744,44 @@ document.addEventListener('click', function (ev) {
   if (act === 'reset') {
     if (!window.confirm('Clear every read, quote, question, reply and ranking from this session, and remove inquiries you created? The seeded inquiries and emails stay.')) return;
     A.wipeDb().then(function () {
-      A.seedFresh(); A.composed = []; A.filter = null; A.inbox.seen = {}; A.pick = {};
+      A.seedFresh(); A.composed = []; A.filter = null; A.inbox.seen = {}; A.pick = {}; A.sv = {}; A.svPreview = {}; A.awardsCache = {};
       A.toast('Cleared.'); A.go('#/inbox'); A.render();
     });
     return;
   }
+  if (act === 'lfilter') { A.labelFilter = t.getAttribute('data-lf') || null; A.render(); return; }
+  if (act === 'pauseread') { A.togglePauseRead(); return; }
+  if (act === 'draft-example-lines') { A.draft = multiLineExampleDraft(); A.render(); return; }
+  /* supplier view */
+  if (act === 'sv-persona') {
+    var m1 = /\/supplier\/([^/]+)\/([^/]+)/.exec(A.current()); if (!m1) return;
+    var pKey = t.getAttribute('data-p');
+    A.sv[A.svKey(m1[1], svCurrentSupplierId(m1[1], m1[2]))] = { persona: pKey, toggles: Object.assign({}, G.PERSONAS[pKey].toggles), format: G.PERSONAS[pKey].format };
+    A.render(); return;
+  }
+  if (act === 'sv-generate') { A.svGenerate(); return; }
+  if (act === 'sv-send') { A.svSend(); return; }
+  if (act === 'sv-discard') { A.svDiscard(); return; }
+  if (act === 'sv-loadall') { A.svLoadAll(t.getAttribute('data-rfq')); return; }
+  if (act === 'sv-answer') { A.svAnswerFollowUp(t.getAttribute('data-rp')); return; }
+  /* quotations */
+  if (act === 'suggest-awards') { A.suggestAwards(t.getAttribute('data-rfq')); return; }
+  if (act === 'ask-line') { A.askLine(t.getAttribute('data-rfq'), t.getAttribute('data-sup'), parseInt(t.getAttribute('data-line'), 10)); return; }
+  if (act === 'award-bulk') {
+    var brfq = t.getAttribute('data-rfq'), blens = t.getAttribute('data-lens');
+    var bsug = A.awardsCache && A.awardsCache[brfq];
+    if (!bsug) { A.toast('Run Suggest awards first.'); return; }
+    if (!window.confirm('Award every eligible line to its ' + (blens === 'cheapest' ? 'cheapest' : 'best-value') + ' quote? Lines you already awarded by hand are kept.')) return;
+    PL.awardBulk(A.store, brfq, blens, bsug, 'you');
+    A.persistAll(); A.toast('Bulk award applied.'); A.render(); return;
+  }
 });
+
+function svCurrentSupplierId(rfqId, tabKey) {
+  var rfq = A.rfqById(rfqId); if (!rfq) return null;
+  var t = A.supplierTabs(rfq).filter(function (x) { return x.key === tabKey; })[0];
+  return t ? t.supplier.id : null;
+}
 
 document.addEventListener('change', function (ev) {
   var t = ev.target.closest('[data-change]');
@@ -1274,6 +1802,20 @@ document.addEventListener('change', function (ev) {
     var sel = $('#award-sel-' + rid); if (sel) sel.value = t.value;
     A.$$('input[name="pick-' + rid + '"]').forEach(function (r) { r.checked = r.value === t.value; r.closest('.lens').classList.toggle('picked', r.checked); });
     var ab = $('[data-act="award"]'); if (ab) ab.disabled = false;
+    return;
+  }
+  if (what === 'multiline') { readDraftForm(); A.draft.multiLine = t.checked; if (t.checked && !A.draft.items.length) A.draft.items = S.sampleLines30.map(function (it) { return Object.assign({}, it); }); A.render(); return; }
+  if (what === 'sv-toggle') {
+    var m2 = /\/supplier\/([^/]+)\/([^/]+)/.exec(A.current()); if (!m2) return;
+    var sv2 = A.svGet(m2[1], svCurrentSupplierId(m2[1], m2[2]), m2[2]);
+    sv2.toggles[t.getAttribute('data-k')] = t.checked;
+    return;
+  }
+  if (what === 'award-pick') {
+    var arfq = t.getAttribute('data-rfq'), aline = parseInt(t.getAttribute('data-line'), 10);
+    if (!t.value) return;
+    PL.awardLine(A.store, arfq, aline, t.value, 'manual', 'you');
+    A.persistAll(); A.toast('Line ' + aline + ' awarded.'); A.render();
     return;
   }
 });

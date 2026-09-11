@@ -30,12 +30,28 @@ function readinessRules(d) {
     items.push({ field: field, label: label, severity: sev, why: why, suggestion: suggestion || '' });
     score -= sev === 'must' ? 18 : 7;
   }
-  if (!d.product || d.product.trim().length < 4) miss('product', 'Product name', 'must', 'Suppliers cannot quote an unnamed item.', 'Name the product the way a factory would list it.');
+  var hasLines = Array.isArray(d.items) && d.items.length > 1;
+  if (!d.product || d.product.trim().length < 4) miss(hasLines ? 'title' : 'product', hasLines ? 'Title' : 'Product name', 'must',
+    hasLines ? 'A name for the whole range helps suppliers and you tell inquiries apart.' : 'Suppliers cannot quote an unnamed item.',
+    hasLines ? 'Name the range, e.g. "Private-label kitchen and dining range".' : 'Name the product the way a factory would list it.');
   if (!d.spec_summary || d.spec_summary.trim().length < 40) miss('spec_summary', 'Specification', 'must', 'A one-line spec gets a one-line quote. Material, size, finish and packaging decide the price.', 'Add material, dimensions, finish, print and packaging.');
-  if (!(d.target_qty > 0)) miss('target_qty', 'Quantity', 'must', 'Price depends on quantity more than anything else.', 'State the quantity you actually intend to order.');
-  if (!d.tier_qtys || d.tier_qtys.length < 2) miss('tier_qtys', 'Price tiers', 'should', 'Asking for two or three quantities shows where the price breaks are.', 'Ask for prices at half, target and double quantity.');
-  var b = d.target_usd_fob || {};
-  if (!(b.lo > 0 && b.hi >= b.lo)) miss('target_usd_fob', 'Target price band', 'must', 'The comparison filters on this band. Without it nothing can be ruled in or out.', 'Set a floor and a ceiling in USD FOB China.');
+
+  if (hasLines) {
+    var lines = d.items;
+    var badLines = lines.filter(function (it) { return !(it.qty > 0) || !(it.floor > 0 && it.ceiling >= it.floor); });
+    if (badLines.length) miss('lines', 'Line list', 'must', badLines.length + ' of ' + lines.length + ' line(s) are missing a quantity or a price band.', 'Fill in a quantity and a floor/ceiling price for every line.');
+    var skus = lines.map(function (it) { return (it.sku || '').toUpperCase(); }).filter(Boolean);
+    var dupSkus = skus.filter(function (s, i) { return skus.indexOf(s) !== i; });
+    if (dupSkus.length) miss('lines', 'Duplicate SKUs', 'must', 'Two or more lines share the same SKU (' + uniq2(dupSkus).join(', ') + '), so a supplier quote could not tell them apart.', 'Give every line a unique SKU.');
+    var thinSpec = lines.filter(function (it) { return !it.spec || it.spec.trim().length < 8; });
+    if (thinSpec.length > lines.length / 3) miss('lines', 'Line specifications', 'should', thinSpec.length + ' of ' + lines.length + ' lines have little or no spec of their own.', 'Add a short spec to each line: material, size, finish.');
+  } else {
+    if (!(d.target_qty > 0)) miss('target_qty', 'Quantity', 'must', 'Price depends on quantity more than anything else.', 'State the quantity you actually intend to order.');
+    if (!d.tier_qtys || d.tier_qtys.length < 2) miss('tier_qtys', 'Price tiers', 'should', 'Asking for two or three quantities shows where the price breaks are.', 'Ask for prices at half, target and double quantity.');
+    var b = d.target_usd_fob || {};
+    if (!(b.lo > 0 && b.hi >= b.lo)) miss('target_usd_fob', 'Target price band', 'must', 'The comparison filters on this band. Without it nothing can be ruled in or out.', 'Set a floor and a ceiling in USD FOB China.');
+  }
+
   if (!d.required_certs || !d.required_certs.length) miss('required_certs', 'Required certifications', 'should', 'With no certificate named, every quote passes that check by default.', 'Name the certificates your destination market requires.');
   if (d.pl_required == null) miss('pl_required', 'Private label', 'must', 'Whether your logo goes on the product changes the minimum order and the price.', 'Say yes or no.');
   if (d.custom_required == null) miss('custom_required', 'Stock or custom', 'should', 'Stock items cannot carry specification changes; suppliers need to know which you want.', 'Say whether an off-the-shelf item is acceptable.');
@@ -47,6 +63,7 @@ function readinessRules(d) {
     .map(function (s) { return { text: s.text, why: s.why }; });
   return { score: Math.max(0, score), ready: !items.some(function (i) { return i.severity === 'must'; }), missing: items, suggested_questions: suggested, spec_gaps: [], source: 'rule' };
 }
+function uniq2(a) { var o = {}, r = []; a.forEach(function (x) { if (!o[x]) { o[x] = 1; r.push(x); } }); return r; }
 
 /* ---- edge-case supplier replies -------------------------------------- */
 
@@ -424,6 +441,329 @@ function draftReply(rec, quote, rfq, items, buyer, meta) {
   return { subject: subject, body: lines.join('\n'), source: 'rule' };
 }
 
-root.GENERATOR = { readinessRules: readinessRules, generateEdgeCases: generateEdgeCases, chaseItems: chaseItems, draftReply: draftReply, tiersFor: tiersFor, Q_SUGGEST: Q_SUGGEST };
+/* ==== v2: the Supplier view composer ==================================
+   Deterministic and instant — no AI involved in writing these emails, so the demo never
+   waits on a model to show an edge case. Every generated email carries a `ref` (the exact
+   shape a real reader would produce) and an `expected` block, and every evidence string in
+   `ref` is built from the very same text placed in the body or the attachment, so it always
+   verifies. */
+
+var PERSONAS = {
+  A: { label: 'Complete quote', format: 'xlsx', toggles: { partialLines: false, missingMoqSome: false, rangePricesSome: false, attachContradicts: false, certOnRequest: false, validityMissing: false, paymentRisky: false, specDeviationSome: false, skipQuestions: false, rmbCurrency: false, cutOffImage: false, noRfqCode: false, unknownSender: false } },
+  B: { label: 'Partial quote', format: 'inline', toggles: { partialLines: true, missingMoqSome: true, rangePricesSome: true, attachContradicts: false, certOnRequest: false, validityMissing: true, paymentRisky: false, specDeviationSome: false, skipQuestions: true, rmbCurrency: false, cutOffImage: false, noRfqCode: false, unknownSender: false } },
+  C: { label: 'Contradictory attachment', format: 'pdf', toggles: { partialLines: false, missingMoqSome: false, rangePricesSome: false, attachContradicts: true, certOnRequest: true, validityMissing: false, paymentRisky: false, specDeviationSome: true, skipQuestions: false, rmbCurrency: false, cutOffImage: false, noRfqCode: false, unknownSender: false } },
+  D: { label: 'Unknown sender, cropped photo', format: 'photo', toggles: { partialLines: true, missingMoqSome: false, rangePricesSome: false, attachContradicts: false, certOnRequest: true, validityMissing: true, paymentRisky: true, specDeviationSome: false, skipQuestions: true, rmbCurrency: true, cutOffImage: true, noRfqCode: true, unknownSender: true } }
+};
+var TOGGLE_LIST = [
+  { key: 'partialLines', label: 'Quote only some of the lines' },
+  { key: 'missingMoqSome', label: 'MOQ missing on some lines' },
+  { key: 'rangePricesSome', label: 'Some prices given as a range' },
+  { key: 'attachContradicts', label: 'Attachment contradicts the body' },
+  { key: 'certOnRequest', label: 'A certificate "on request" (unverified)' },
+  { key: 'validityMissing', label: 'No quote validity given' },
+  { key: 'paymentRisky', label: 'Payment 100% in advance' },
+  { key: 'specDeviationSome', label: 'A spec deviation on some lines' },
+  { key: 'skipQuestions', label: 'Skip one or two of our questions' },
+  { key: 'rmbCurrency', label: 'Prices in RMB, not USD' },
+  { key: 'cutOffImage', label: 'Cropped photo, rows cut off' },
+  { key: 'noRfqCode', label: 'No RFQ code anywhere' },
+  { key: 'unknownSender', label: 'Sender not on our recipient list' }
+];
+var FORMATS_V2 = ['inline', 'xlsx', 'pdf', 'csv', 'photo', 'screenshot'];
+
+function personaFor(key) { return PERSONAS[key] || PERSONAS.A; }
+
+function selectLines(items, toggles) {
+  if (toggles.cutOffImage) return items.slice(0, Math.max(8, Math.ceil(items.length * 0.4)));
+  if (toggles.partialLines) return items.filter(function (it, i) { return (i % 4) !== 3; });
+  return items.slice();
+}
+
+function personaFactor(personaKey) { return { A: 0.95, B: 1.08, C: 1.02, D: 0.85 }[personaKey] || 1; }
+
+function fakeAddress(supplierRec, personaKey) {
+  if (supplierRec && !supplierRec.unknown) {
+    var dom = (supplierRec.domains && supplierRec.domains[0]) || 'example.com';
+    var names = ['Alice', 'Kevin', 'Cindy', 'Michael', 'Vicky', 'Jason', 'Nancy', 'Peter'];
+    var person = names[(supplierRec.name.length + personaKey.charCodeAt(0)) % names.length];
+    return { name: person + ' — ' + supplierRec.name, from_name: person, from: person.toLowerCase() + '@' + dom };
+  }
+  return { name: 'Kitchenware Direct Co.', from_name: 'Sales', from: 'kitchenwaredirect2018@163.com' };
+}
+
+function fmtRow(item, priceStr, moqStr, curSymbol) {
+  return item.sku + '  ' + item.product + '  qty ' + fmtQty(item.qty) + '  ' + curSymbol + priceStr + '/' + item.unit + (moqStr ? '  MOQ ' + moqStr : '');
+}
+
+function compose(rfq, supplierRec, personaKey, toggles, format, meta, buyer) {
+  toggles = Object.assign({}, personaFor(personaKey).toggles, toggles || {});
+  format = format || personaFor(personaKey).format;
+  var items = R.rfqItems(rfq);
+  var quoted = selectLines(items, toggles);
+  var addr = fakeAddress(supplierRec, personaKey);
+  var cur = toggles.rmbCurrency ? 'CNY' : 'USD';
+  var curSym = toggles.rmbCurrency ? '¥' : '$';
+  var rate = toggles.rmbCurrency ? (meta.fx.CNY || 7.15) : 1;
+
+  var lineData = quoted.map(function (item, i) {
+    var mid = (item.target_usd_fob.lo + item.target_usd_fob.hi) / 2;
+    var bodyPrice = r2(mid * personaFactor(personaKey) * rate);
+    var attPrice = toggles.attachContradicts ? r2(mid * 0.90 * rate) : bodyPrice;
+    var moq = item.tier_qtys[0] || Math.max(50, Math.round(item.qty / 3));
+    var hasMoq = !(toggles.missingMoqSome && i % 5 === 4);
+    var isRange = toggles.rangePricesSome && i % 6 === 5;
+    var hasDeviation = toggles.specDeviationSome && i % 7 === 6;
+    return {
+      item: item, bodyPrice: bodyPrice, attPrice: attPrice, moq: hasMoq ? moq : null,
+      isRange: isRange, hasDeviation: hasDeviation
+    };
+  });
+
+  var certs = (rfq.required_certs || []).map(function (c, i) {
+    var last = i === (rfq.required_certs.length - 1);
+    return { name: c, canon: c, doc: !(toggles.certOnRequest && last), number: c + '-2025-' + (4000 + i * 37) };
+  });
+
+  var custom = (rfq.custom_questions || []).slice(0, toggles.skipQuestions ? Math.max(1, rfq.custom_questions.length - 2) : rfq.custom_questions.length)
+    .map(function (cq) { return { qid: cq.qid, text: answerForQuestion(cq) }; });
+
+  /* ---- build the row strings once, reuse verbatim in the transcript/body and in ref.ev --- */
+  var rows = lineData.map(function (ld) {
+    var priceTxt = ld.isRange ? (curSym + m2(ld.attPrice * 0.92) + '-' + curSym + m2(ld.attPrice * 1.08)) : (curSym + m2(ld.attPrice));
+    var row = ld.item.sku + '\t' + ld.item.product + '\t' + fmtQty(ld.item.qty) + ' ' + ld.item.unit + '\t' + priceTxt + (ld.moq ? '\tMOQ ' + fmtQty(ld.moq) + ' ' + ld.item.unit : '\tMOQ —') + (ld.hasDeviation ? '\t(offered in clear finish, not frosted)' : '');
+    return { ld: ld, row: row, priceTxt: priceTxt };
+  });
+
+  var attName, attType, transcript;
+  if (format === 'xlsx') {
+    attType = 'xlsx'; attName = 'pricing_' + rfq.code.replace('RFQ-', '') + '.xlsx';
+    transcript = '[XLSX TRANSCRIPT — sheet "Quote", ' + (rows.length + 8) + ' rows]\n\nA1  ' + (supplierRec && !supplierRec.unknown ? supplierRec.name.toUpperCase() : addr.name.toUpperCase()) +
+      '\nA2  Quotation for\t' + rfq.code + '\nA3  Date\t' + rfq.sent_at + '\n\nA5  SKU\tProduct\tQty\tPrice\tMOQ\n' +
+      rows.map(function (r, i) { return 'A' + (6 + i) + '  ' + r.row; }).join('\n');
+  } else if (format === 'pdf') {
+    attType = 'pdf'; attName = rfq.code.replace('RFQ-', 'Quotation-') + '.pdf';
+    transcript = '[PDF TRANSCRIPT — 1 page, text layer extracted]\n\n' + (supplierRec && !supplierRec.unknown ? supplierRec.name.toUpperCase() : addr.name.toUpperCase()) +
+      '\nQUOTATION            Ref: ' + rfq.code + '\n\nSKU        Product                              Qty        Price       MOQ\n' +
+      rows.map(function (r) { return r.row.replace(/\t/g, '   '); }).join('\n');
+  } else if (format === 'csv') {
+    attType = 'csv'; attName = 'pricelist_' + rfq.code.replace('RFQ-', '') + '.csv';
+    transcript = '[CSV TRANSCRIPT — ' + attName + ', ' + (rows.length + 1) + ' rows]\n\nsku,product,qty,price,moq\n' +
+      rows.map(function (r) { return r.ld.item.sku + ',' + r.ld.item.product + ',' + fmtQty(r.ld.item.qty) + ',' + r.priceTxt.replace(/[¥$]/g, '') + ',' + (r.ld.moq || ''); }).join('\n');
+  } else if (format === 'photo') {
+    attType = 'photo'; attName = 'IMG_' + rfq.sent_at.replace(/-/g, '') + '_' + (2000 + (rfq.id.length * 7) % 900) + '.jpg';
+    var shown = rows.slice(0, toggles.cutOffImage ? Math.max(4, rows.length - 3) : rows.length);
+    transcript = '[PHOTO TRANSCRIPT — printed rate card, angled shot' + (toggles.cutOffImage ? ', right/bottom edge outside the frame' : '') + ']\n\n报价单 / QUOTATION\n\n' +
+      shown.map(function (r) { return r.row.replace(/\t/g, '   '); }).join('\n') +
+      (toggles.cutOffImage ? '\n' + rows.slice(shown.length).map(function () { return '[CUT OFF]'; }).join('\n') : '');
+  } else if (format === 'screenshot') {
+    attType = 'screenshot'; attName = 'chat_' + rfq.sent_at.replace(/-/g, '') + '.png';
+    transcript = '[SCREENSHOT TRANSCRIPT — chat conversation]\n\n' + rows.map(function (r) { return addr.from_name + ': ' + r.row.replace(/\t/g, ', '); }).join('\n');
+  } else { attType = null; attName = null; transcript = null; }
+
+  var bodyLines = [];
+  bodyLines.push(toggles.unknownSender ? 'Hello,' : 'Dear ' + buyer.name + ',');
+  if (attType) {
+    bodyLines.push('', (toggles.unknownSender ? 'This is our price list, please see attached.' : 'Thank you for your enquiry ' + (toggles.noRfqCode ? '' : rfq.code) + '. Please find our quotation attached for the range.'));
+    if (toggles.attachContradicts) {
+      var sample = rows.slice(0, 3);
+      bodyLines.push('', 'For quick reference, our best prices are: ' + sample.map(function (r) { return r.ld.item.sku + ' at ' + curSym + m2(r.ld.bodyPrice); }).join(', ') + '.');
+    }
+  } else {
+    bodyLines.push('', (toggles.noRfqCode ? 'Thank you for the enquiry. Our prices:' : 'Thank you for your enquiry ' + rfq.code + '. Our prices:'));
+    bodyLines.push('', rows.map(function (r) { return r.row.replace(/\t/g, '  '); }).join('\n'));
+  }
+  bodyLines.push('', 'Terms: FOB ' + (supplierRec && !supplierRec.unknown ? (supplierRec.city || 'China') : 'China') + ', ' +
+    (toggles.paymentRisky ? '100% T/T before production' : '30% deposit, 70% before shipment') +
+    (toggles.validityMissing ? '' : ', valid ' + 30 + ' days') + '.');
+  bodyLines.push('Lead time ' + (30 + (personaKey === 'B' ? 5 : 0)) + ' days after deposit.');
+  bodyLines.push('Certification: ' + certs.map(function (c) { return c.name + (c.doc ? ' (report ' + c.number + ')' : ' (report on request)'); }).join(', ') + '.');
+  bodyLines.push('Private label: yes' + (toggles.unknownSender ? ', we can print your logo.' : ', your logo across the range.'));
+  if (custom.length) { bodyLines.push(''); custom.forEach(function (c, i) { bodyLines.push((i + 1) + '. ' + c.text); }); }
+  bodyLines.push('', 'Best regards,', addr.from_name, supplierRec && !supplierRec.unknown ? supplierRec.name : '');
+  var body = bodyLines.join('\n');
+
+  var subject = toggles.noRfqCode ? 'Kitchen range quotation' : 'Re: ' + rfq.code + ' — quotation';
+  var email = {
+    id: 'em_sv_' + rfq.id.replace('rfq_', '') + '_' + (supplierRec && supplierRec.id ? supplierRec.id.replace('sup_', '') : 'd') + '_' + Date.now().toString(36),
+    sample_id: null, generated: true, generated_by: 'rule', supplier_id: supplierRec && supplierRec.id || null, rfq_id: toggles.noRfqCode ? null : rfq.id,
+    format: format, label: personaFor(personaKey).label + ' — ' + (supplierRec && !supplierRec.unknown ? supplierRec.name : 'unknown sender'),
+    blurb: 'Composed from the Supplier view: ' + Object.keys(toggles).filter(function (k) { return toggles[k]; }).length + ' edge case(s) planted.',
+    tags: ['generated', 'persona-' + personaKey], from_name: addr.from_name, from: addr.from, to: buyer.email,
+    date: new Date(Date.parse(rfq.sent_at + 'T02:00:00Z') + 1000 * 60 * 60 * 24 * (2 + (personaKey.charCodeAt(0) % 4))).toISOString(),
+    subject: subject, body_raw: body, attachments: attType ? [{ name: attName, type: attType, transcript: transcript, truncated: !!toggles.cutOffImage }] : []
+  };
+
+  var termsF = {
+    currency: F(cur, null, 0.9, curSym, 'body'),
+    price_basis: F({ incoterm: 'FOB', place: (supplierRec && !supplierRec.unknown ? (supplierRec.city || 'China') : 'China') }, null, 0.9, 'FOB ' + (supplierRec && !supplierRec.unknown ? (supplierRec.city || 'China') : 'China'), 'body'),
+    lead_time: F({ lo: 30 + (personaKey === 'B' ? 5 : 0), hi: 30 + (personaKey === 'B' ? 5 : 0), from: 'deposit' }, null, 0.9, 'Lead time ' + (30 + (personaKey === 'B' ? 5 : 0)) + ' days after deposit.', 'body'),
+    payment: F({ terms: toggles.paymentRisky ? '100% T/T before production' : '30% deposit, 70% before shipment' }, null, 0.9, toggles.paymentRisky ? '100% T/T before production' : '30% deposit, 70% before shipment', 'body'),
+    certs: F(certs.map(function (c) { return { name: c.name, canon: c.canon, scope: 'product', doc: c.doc }; }), null, 0.9, 'Certification: ' + certs.map(function (c) { return c.name + (c.doc ? ' (report ' + c.number + ')' : ' (report on request)'); }).join(', ') + '.', 'body'),
+    private_label: F({ ans: 'yes', cond: null }, null, 0.9, 'Private label: yes', 'body'),
+    custom: custom.map(function (c, i) { return { qid: c.qid, v: c.text, c: 0.85, ev: (i + 1) + '. ' + c.text, src: 'body' }; })
+  };
+  if (!toggles.validityMissing) termsF.validity = F({ days: 30 }, null, 0.9, 'valid 30 days', 'body');
+
+  var refLines = rows.map(function (r) {
+    var ld = r.ld;
+    var entry = { line: ld.item.line, sku: ld.item.sku, product: ld.item.product, c: 0.92, ev: r.row.replace(/\t/g, attType ? '\t' : '  '), src: attType ? 'att:' + attName : 'body' };
+    if (ld.isRange) entry.range = { lo: r2(ld.attPrice * 0.92), hi: r2(ld.attPrice * 1.08) };
+    else entry.p = [{ qmin: ld.item.tier_qtys[0], qmax: null, p: ld.attPrice }];
+    if (ld.moq) entry.moq = { n: ld.moq, u: ld.item.unit, pack: null };
+    if (ld.hasDeviation) entry.note = 'Offered in clear finish, not the frosted finish we asked for';
+    return entry;
+  });
+  /* the attachment transcript uses two-space separators for photo/screenshot rendering above;
+     keep ev consistent with whichever text actually holds it */
+  if (format === 'photo' || format === 'screenshot' || format === 'pdf') {
+    refLines.forEach(function (rl) { rl.ev = rl.ev.replace(/\t/g, format === 'pdf' ? '   ' : (format === 'screenshot' ? ', ' : '   ')); if (format === 'screenshot') rl.ev = addr.from_name + ': ' + rl.ev; });
+  }
+
+  var flags = [];
+  rows.forEach(function (r) { if (r.ld.hasDeviation) flags.push({ code: 'SPEC_DEVIATION', line: r.ld.item.line, note: 'Offered in clear finish, not the frosted finish we asked for', ev: r.ld.hasDeviation ? refLines.filter(function (x) { return x.line === r.ld.item.line; })[0].ev : null, src: attType ? 'att:' + attName : 'body' }); });
+
+  var gaps = [];
+  if (toggles.attachContradicts) {
+    rows.slice(0, 3).forEach(function (r) {
+      gaps.push({ field: 'price', kind: 'conflict', note: 'Body quotes ' + curSym + m2(r.ld.bodyPrice) + ', attachment quotes ' + curSym + m2(r.ld.attPrice) + ' for ' + r.ld.item.sku, ev: r.ld.item.sku + ' at ' + curSym + m2(r.ld.bodyPrice), src: 'body' });
+    });
+  }
+
+  var ref = { sv: 2, kind: 'quote', lang: ['en'], supplier: { name: F(supplierRec && !supplierRec.unknown ? supplierRec.name : addr.name, null, 0.9, null), person: F(addr.from_name, null, 0.9, null), role: supplierRec && !supplierRec.unknown ? (supplierRec.role || 'factory') : 'trading' },
+    terms: termsF, lines: refLines, gaps: gaps, flags: flags, needs_human: [], assumed: [] };
+
+  var expected = {
+    kind: 'quote', rfq_code: toggles.noRfqCode ? null : rfq.code,
+    lines_quoted: refLines.length, lines_total: items.length,
+    gates: [].concat(
+      toggles.partialLines || toggles.cutOffImage ? ['LINES_NOT_QUOTED'] : [],
+      toggles.attachContradicts ? ['BODY_ATTACH_CONFLICT'] : [],
+      toggles.certOnRequest ? ['CERT_UNVERIFIED'] : [],
+      toggles.validityMissing ? ['CRITICAL_FIELD_MISSING'] : [],
+      toggles.paymentRisky ? ['PAYMENT_RISK'] : [],
+      toggles.specDeviationSome ? ['SPEC_DEVIATION'] : [],
+      toggles.rmbCurrency ? ['CURRENCY_CONVERTED'] : [],
+      toggles.noRfqCode ? ['RFQ_MATCH_LOW_CONF'] : [],
+      toggles.unknownSender ? ['SENDER_NOT_IN_RECIPIENTS'] : []
+    )
+  };
+
+  if (toggles.noRfqCode) email.ref_match = { rfqCode: rfq.code, c: 0.82, why: 'The product range and line count match this open RFQ closely.' };
+
+  return { email: email, ref: ref, expected: expected };
+}
+
+/* ---- v2: a simulated follow-up answering our chase email -------------- */
+/* Persona A and C answer everything asked; B answers about half; D never replies (the
+   caller should simply not create an email when this returns null). */
+function answerFollowUp(rfq, supplierRec, personaKey, reply, meta, buyer) {
+  if (personaKey === 'D') return null;
+  var fraction = personaKey === 'B' ? 0.5 : 1;
+  var items = (reply.items || []);
+  var toAnswer = items.filter(function (_, i) { return i < Math.ceil(items.length * fraction); });
+  if (!toAnswer.length) return null;
+
+  var lineFills = {}, termFills = {};
+  toAnswer.forEach(function (key) {
+    var m = /^gap:(price|moq|lead_time):L(\d+)$/.exec(key);
+    if (m) { lineFills[m[2]] = lineFills[m[2]] || {}; lineFills[m[2]][m[1]] = true; return; }
+    var m2v = /^gate:CRITICAL_FIELD_MISSING:(validity|payment|custom_questions)$/.exec(key) || /^gate:(CERT_UNVERIFIED|CURRENCY_ASSUMED|INCOTERM_MISMATCH|PAYMENT_RISK)$/.exec(key);
+    if (m2v) termFills[m2v[1] || m2v[0]] = true;
+  });
+
+  var addr = fakeAddress(supplierRec, personaKey);
+  var lines = [];
+  var bodyLines = ['Dear ' + buyer.name + ',', '', 'Thank you, here are the details you asked for:'];
+  var items_ = R.rfqItems(rfq);
+  Object.keys(lineFills).forEach(function (lineNo) {
+    var item = items_.filter(function (it) { return it.line === Number(lineNo); })[0];
+    if (!item) return;
+    var mid = (item.target_usd_fob.lo + item.target_usd_fob.hi) / 2;
+    var fills = lineFills[lineNo];
+    var entry = { line: item.line, sku: item.sku, product: item.product, c: 0.9, src: 'body' };
+    var rowBits = [item.sku];
+    if (fills.price) { var price = r2(mid * personaFactor(personaKey)); entry.p = [{ qmin: item.tier_qtys[0], qmax: null, p: price }]; rowBits.push('USD ' + m2(price)); }
+    if (fills.moq) { entry.moq = { n: item.tier_qtys[0], u: item.unit, pack: null }; rowBits.push('MOQ ' + fmtQty(item.tier_qtys[0])); }
+    if (fills.lead_time) { entry.lt = { lo: 30, hi: 30, from: 'deposit' }; rowBits.push('30 days lead time'); }
+    var row = rowBits.join(' — ');
+    entry.ev = row;
+    lines.push(entry);
+    bodyLines.push('Line ' + item.line + ': ' + row + '.');
+  });
+  if (termFills.validity) bodyLines.push('This quotation is valid 20 days.');
+  if (termFills.payment) bodyLines.push('Payment: 30% deposit, 70% before shipment.');
+  if (termFills.custom_questions) bodyLines.push('To answer your remaining question: yes, this is confirmed.');
+  bodyLines.push('', 'Best regards,', addr.from_name);
+  var body = bodyLines.join('\n');
+
+  var terms = {};
+  if (termFills.validity) terms.validity = F({ days: 20 }, null, 0.9, 'valid 20 days', 'body');
+  if (termFills.payment) terms.payment = F({ terms: '30% deposit, 70% before shipment' }, null, 0.9, 'Payment: 30% deposit, 70% before shipment.', 'body');
+  if (termFills.custom_questions) terms.custom = (rfq.custom_questions || []).map(function (cq) { return { qid: cq.qid, v: 'confirmed', c: 0.8, ev: 'yes, this is confirmed', src: 'body' }; });
+
+  var email = {
+    id: 'em_sv_' + rfq.id.replace('rfq_', '') + '_' + (supplierRec && supplierRec.id ? supplierRec.id.replace('sup_', '') : 'd') + '_r' + Date.now().toString(36),
+    sample_id: null, generated: true, generated_by: 'rule', supplier_id: supplierRec && supplierRec.id || null, rfq_id: rfq.id, in_reply_to: reply.id,
+    format: 'inline', label: 'Follow-up from ' + (supplierRec && !supplierRec.unknown ? supplierRec.name : 'unknown sender'),
+    blurb: (fraction === 1 ? 'Answers everything asked.' : 'Answers about half of what was asked.'),
+    tags: ['generated', 'supplement'], from_name: addr.from_name, from: addr.from, to: buyer.email,
+    date: R.addDays(reply.due || meta.demo_now, -1) + 'T04:00:00Z',
+    subject: 'Re: ' + reply.subject, body_raw: body, attachments: []
+  };
+  var ref = { sv: 2, kind: 'supplement', lang: ['en'], supplier: { name: F(supplierRec && !supplierRec.unknown ? supplierRec.name : addr.name), person: F(addr.from_name), role: 'factory' }, terms: terms, lines: lines, gaps: [], flags: [], needs_human: [], assumed: [] };
+  return { email: email, ref: ref, expected: { kind: 'supplement', answered: toAnswer.length, asked: items.length } };
+}
+
+/* ---- v2: chase items across one or more lines for one supplier -------- */
+var ASK_TERMS_V2 = {
+  'validity': function () { return 'How long this quotation stays valid.'; },
+  'payment': function () { return 'Your payment terms for this order.'; },
+  'custom_questions': function () { return 'The question(s) from our first email that were not answered yet.'; },
+  'CERT_UNVERIFIED': function () { return 'Certificate numbers or copies for the certificates marked "on request".'; },
+  'CURRENCY_ASSUMED': function () { return 'Confirmation of the currency; none was stated.'; },
+  'INCOTERM_MISMATCH': function () { return 'Your FOB China price; we cannot compare on another basis.'; },
+  'PAYMENT_RISK': function () { return 'Payment terms with a deposit rather than 100% in advance, if possible.'; }
+};
+function chaseItemsV2(lineQuotes, headerGates, rfq) {
+  var items = [];
+  (lineQuotes || []).forEach(function (q) {
+    (q.gaps || []).forEach(function (g) {
+      if (g.kind !== 'missing' && g.kind !== 'partial') return;
+      var label = g.field === 'price' ? 'unit price' : g.field === 'moq' ? 'minimum order quantity' : g.field === 'lead_time' ? 'lead time' : null;
+      if (!label) return;
+      items.push({ key: 'gap:' + g.field + ':L' + q.line, line: q.line, ask: 'Line ' + q.line + ' (' + q.sku + '): your ' + label + '.' });
+    });
+  });
+  (headerGates || []).forEach(function (g) {
+    if (g.status && g.status !== 'open') return;
+    var fn = ASK_TERMS_V2[g.field] || ASK_TERMS_V2[g.code];
+    if (!fn) return;
+    items.push({ key: 'gate:' + g.code + ':' + (g.field || ''), line: null, ask: fn(rfq, g) });
+  });
+  return items;
+}
+function draftLineReply(rfq, supplierName, items, lines, buyer, meta) {
+  var due = R.addDays(meta.demo_now, 3);
+  var subject = 'Re: ' + rfq.code + ' — details on ' + lines.length + ' line' + (lines.length > 1 ? 's' : '');
+  var bodyLines = ['Dear ' + (supplierName || 'Supplier') + ',', '', 'Thank you for your quotation for ' + rfq.code + '. Before we can compare it we need:', ''];
+  items.forEach(function (it, i) { bodyLines.push((i + 1) + '. ' + it.ask); });
+  bodyLines.push('', 'Could you reply by ' + due + '?', '', 'Best regards,', buyer.name, buyer.email);
+  return { subject: subject, body: bodyLines.join('\n'), source: 'rule' };
+}
+function answerForQuestion(cq) {
+  var t = cq.text.toLowerCase();
+  if (/logo|print/.test(t)) return 'Yes, every SKU can carry your logo; minimum 1,000 pcs per SKU for printing.';
+  if (/cannot|produce/.test(t)) return 'All SKUs can be produced at the quantities requested.';
+  if (/earliest|slot|production/.test(t)) return 'We can start production within 10 days of deposit.';
+  if (/consolidate|shipment|container/.test(t)) return 'We can consolidate the full range into one 40ft container.';
+  return 'Confirmed, no issues on our side.';
+}
+
+root.GENERATOR = {
+  readinessRules: readinessRules, generateEdgeCases: generateEdgeCases, chaseItems: chaseItems, draftReply: draftReply, tiersFor: tiersFor, Q_SUGGEST: Q_SUGGEST,
+  /* v2 */
+  PERSONAS: PERSONAS, TOGGLE_LIST: TOGGLE_LIST, FORMATS_V2: FORMATS_V2,
+  compose: compose, answerFollowUp: answerFollowUp, chaseItemsV2: chaseItemsV2, draftLineReply: draftLineReply
+};
 
 })(typeof window !== 'undefined' ? window : globalThis);

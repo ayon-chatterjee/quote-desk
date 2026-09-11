@@ -6,7 +6,7 @@
 var META = {
   demo_now: '2026-09-10',
   fx: { CNY: 7.15, HKD: 7.82, EUR: 0.92, date: '2026-09-08' },
-  prompt_versions: { extract: 'x7', match: 'm3', compare: 'c5' },
+  prompt_versions: { extract: 'x7', extract_v2: 'x2v', match: 'm3', compare: 'c5', awards: 'aw1' },
   thresholds: {
     conf_critical: 0.7,
     outlier_lo: 0.6,
@@ -109,6 +109,62 @@ var RFQS = [
     recipients: ['sup_packpro', 'sup_qingdao', 'sup_shprint'],
     sent_at: '2026-08-27',
     deadline: '2026-09-09',
+    status: 'open'
+  }
+,
+  {
+    id: 'rfq_0440',
+    code: 'RFQ-2026-0440',
+    product: 'Private-label kitchen and dining range',
+    title: 'Private-label kitchen and dining range',
+    spec_summary: 'Thirty-SKU private-label kitchen and dining collection: silicone tools, bamboo boards and accessories, glass storage with bamboo lids, stainless steel tools, and kraft-lined lunch boxes. One consistent logo treatment across the range.',
+    items: [
+      { line: 1, sku: 'VF-KD-001', product: 'Silicone spatula 28cm', spec: 'Food-grade silicone, 1-colour logo', qty: 4000, unit: 'pc', target_usd_fob: { lo: 0.62, hi: 0.95 }, tier_qtys: [2000, 4000, 8000] },
+      { line: 2, sku: 'VF-KD-002', product: 'Silicone spoon set, 2pc', spec: 'Food-grade silicone, 1-colour logo', qty: 3000, unit: 'set', target_usd_fob: { lo: 0.85, hi: 1.25 }, tier_qtys: [1500, 3000, 6000] },
+      { line: 3, sku: 'VF-KD-003', product: 'Silicone basting brush', spec: 'Food-grade silicone, 1-colour logo', qty: 5000, unit: 'pc', target_usd_fob: { lo: 0.35, hi: 0.55 }, tier_qtys: [2500, 5000, 10000] },
+      { line: 4, sku: 'VF-KD-004', product: 'Silicone oven mitt, pair', spec: 'Food-grade silicone, 1-colour logo', qty: 2500, unit: 'pair', target_usd_fob: { lo: 1.10, hi: 1.60 }, tier_qtys: [1250, 2500, 5000] },
+      { line: 5, sku: 'VF-KD-005', product: 'Silicone trivet, round 20cm', spec: 'Food-grade silicone, 1-colour logo', qty: 2000, unit: 'pc', target_usd_fob: { lo: 0.70, hi: 1.05 }, tier_qtys: [1000, 2000, 4000] },
+      { line: 6, sku: 'VF-KD-006', product: 'Silicone ice cube tray, 12-cavity', spec: 'Food-grade silicone, 1-colour logo', qty: 3500, unit: 'pc', target_usd_fob: { lo: 0.55, hi: 0.85 }, tier_qtys: [1750, 3500, 7000] },
+      { line: 7, sku: 'VF-KD-007', product: 'Silicone baking mat 40x30cm', spec: 'Food-grade silicone, 1-colour logo', qty: 1800, unit: 'pc', target_usd_fob: { lo: 1.20, hi: 1.70 }, tier_qtys: [900, 1800, 3600] },
+      { line: 8, sku: 'VF-KD-008', product: 'Silicone stretch lids, set of 3', spec: 'Food-grade silicone, 1-colour logo', qty: 3000, unit: 'set', target_usd_fob: { lo: 1.40, hi: 2.00 }, tier_qtys: [1500, 3000, 6000] },
+      { line: 9, sku: 'VF-KD-009', product: 'Silicone garlic peeler', spec: 'Food-grade silicone, 1-colour logo', qty: 6000, unit: 'pc', target_usd_fob: { lo: 0.22, hi: 0.38 }, tier_qtys: [3000, 6000, 12000] },
+      { line: 10, sku: 'VF-KD-010', product: 'Silicone whisk', spec: 'Food-grade silicone, 1-colour logo', qty: 2500, unit: 'pc', target_usd_fob: { lo: 0.65, hi: 0.98 }, tier_qtys: [1250, 2500, 5000] },
+      { line: 11, sku: 'VF-KD-011', product: 'Bamboo cutting board 35x25cm', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 1500, unit: 'pc', target_usd_fob: { lo: 2.20, hi: 3.10 }, tier_qtys: [750, 1500, 3000] },
+      { line: 12, sku: 'VF-KD-012', product: 'Bamboo cutting board, small 25x18cm', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 2000, unit: 'pc', target_usd_fob: { lo: 1.40, hi: 2.00 }, tier_qtys: [1000, 2000, 4000] },
+      { line: 13, sku: 'VF-KD-013', product: 'Bamboo utensil holder', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 1200, unit: 'pc', target_usd_fob: { lo: 1.60, hi: 2.30 }, tier_qtys: [600, 1200, 2400] },
+      { line: 14, sku: 'VF-KD-014', product: 'Bamboo dish rack', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 800, unit: 'pc', target_usd_fob: { lo: 3.80, hi: 5.20 }, tier_qtys: [500, 800, 1600] },
+      { line: 15, sku: 'VF-KD-015', product: 'Bamboo trivet, set of 2', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 1500, unit: 'set', target_usd_fob: { lo: 1.10, hi: 1.60 }, tier_qtys: [750, 1500, 3000] },
+      { line: 16, sku: 'VF-KD-016', product: 'Bamboo salad servers, set of 2', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 1800, unit: 'set', target_usd_fob: { lo: 0.90, hi: 1.35 }, tier_qtys: [900, 1800, 3600] },
+      { line: 17, sku: 'VF-KD-017', product: 'Glass storage jar 500ml with bamboo lid', spec: 'Borosilicate glass, silicone seal', qty: 3000, unit: 'pc', target_usd_fob: { lo: 1.15, hi: 1.65 }, tier_qtys: [1500, 3000, 6000] },
+      { line: 18, sku: 'VF-KD-018', product: 'Glass storage jar 1000ml with bamboo lid', spec: 'Borosilicate glass, silicone seal', qty: 2200, unit: 'pc', target_usd_fob: { lo: 1.55, hi: 2.15 }, tier_qtys: [1100, 2200, 4400] },
+      { line: 19, sku: 'VF-KD-019', product: 'Glass spice jar set, 6pc with rack', spec: 'Borosilicate glass, silicone seal', qty: 900, unit: 'set', target_usd_fob: { lo: 4.20, hi: 5.80 }, tier_qtys: [500, 900, 1800] },
+      { line: 20, sku: 'VF-KD-020', product: 'Glass measuring cup 500ml', spec: 'Borosilicate glass, silicone seal', qty: 1600, unit: 'pc', target_usd_fob: { lo: 1.05, hi: 1.55 }, tier_qtys: [800, 1600, 3200] },
+      { line: 21, sku: 'VF-KD-021', product: 'Stainless steel straws, set of 4 + brush', spec: '304 stainless steel, 1-colour logo print', qty: 4000, unit: 'set', target_usd_fob: { lo: 0.70, hi: 1.05 }, tier_qtys: [2000, 4000, 8000] },
+      { line: 22, sku: 'VF-KD-022', product: 'Stainless steel ice cubes, set of 4', spec: '304 stainless steel, 1-colour logo print', qty: 2000, unit: 'set', target_usd_fob: { lo: 0.95, hi: 1.40 }, tier_qtys: [1000, 2000, 4000] },
+      { line: 23, sku: 'VF-KD-023', product: 'Stainless steel garlic press', spec: '304 stainless steel, 1-colour logo print', qty: 2500, unit: 'pc', target_usd_fob: { lo: 1.25, hi: 1.75 }, tier_qtys: [1250, 2500, 5000] },
+      { line: 24, sku: 'VF-KD-024', product: 'Stainless steel citrus juicer', spec: '304 stainless steel, 1-colour logo print', qty: 1400, unit: 'pc', target_usd_fob: { lo: 1.80, hi: 2.50 }, tier_qtys: [700, 1400, 2800] },
+      { line: 25, sku: 'VF-KD-025', product: 'Kraft-lined lunch box 900ml', spec: 'Kraft-fibre composite, PP lid, 1-colour logo', qty: 2600, unit: 'pc', target_usd_fob: { lo: 1.60, hi: 2.30 }, tier_qtys: [1300, 2600, 5200] },
+      { line: 26, sku: 'VF-KD-026', product: 'Kraft-lined lunch box 1400ml with divider', spec: 'Kraft-fibre composite, PP lid, 1-colour logo', qty: 1900, unit: 'pc', target_usd_fob: { lo: 2.10, hi: 2.90 }, tier_qtys: [950, 1900, 3800] },
+      { line: 27, sku: 'VF-KD-027', product: 'Insulated lunch bag', spec: 'Kraft-fibre composite, PP lid, 1-colour logo', qty: 1500, unit: 'pc', target_usd_fob: { lo: 2.40, hi: 3.30 }, tier_qtys: [750, 1500, 3000] },
+      { line: 28, sku: 'VF-KD-028', product: 'Bamboo fibre storage canister, set of 3', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 1100, unit: 'set', target_usd_fob: { lo: 3.10, hi: 4.30 }, tier_qtys: [550, 1100, 2200] },
+      { line: 29, sku: 'VF-KD-029', product: 'Silicone dish scrubber, set of 3', spec: 'Food-grade silicone, 1-colour logo', qty: 3500, unit: 'set', target_usd_fob: { lo: 0.45, hi: 0.70 }, tier_qtys: [1750, 3500, 7000] },
+      { line: 30, sku: 'VF-KD-030', product: 'Bamboo dish brush, replaceable head', spec: 'Natural bamboo, oil-finished, laser-engraved logo', qty: 4200, unit: 'pc', target_usd_fob: { lo: 0.60, hi: 0.90 }, tier_qtys: [2100, 4200, 8400] }
+    ],
+    required_certs: ['FDA', 'LFGB'],
+    pl_required: true,
+    custom_required: true,
+    max_lead_days: 40,
+    dest_port: 'Nhava Sheva, India',
+    incoterm: 'FOB',
+    custom_questions: [
+      { qid: 'q1', text: 'Can every SKU carry our 1-colour logo, and is there a minimum quantity per SKU for logo printing?', required: true },
+      { qid: 'q2', text: 'Which SKUs, if any, cannot be produced at the quantities we have asked for?', required: true },
+      { qid: 'q3', text: 'What is the earliest production slot you can offer for an order across the whole range?', required: true },
+      { qid: 'q4', text: 'Can you consolidate all 30 SKUs into one shipment, or would this ship in more than one container?', required: false }
+    ],
+    recipients: ['sup_silitech', 'sup_homeware', 'sup_everbright'],
+    sent_at: '2026-09-01',
+    deadline: '2026-09-15',
     status: 'open'
   }
 ];
@@ -396,9 +452,13 @@ var ATT_TEMPLATES = {
   thread: { body: 'Hi team,\n\nThanks for including us. Price will be USD {{price_lo}}-{{price_hi}} depending on colour and packing. MOQ {{tier2}} {{units}}. We do OEM, logo print is fine.\n\nLet me know the final colour and we will confirm exactly.\n\nSales Team\n\nOn {{sent}}, {{buyer}} <{{buyeremail}}> wrote:\n> Dear supplier,\n>\n> Please quote {{code}}, {{product}}.\n> Target quantity {{qty}} {{units}}. Our target price is USD {{band_lo}} - {{band_hi}} FOB.\n> Required: {{certs}}, private label.\n>\n> Please include MOQ, lead time, validity, payment terms and sample cost.\n>\n> {{buyer}}' }
 };
 
+var SAMPLE_LINES_30 = RFQS.filter(function (r) { return r.id === 'rfq_0440'; })[0].items.map(function (it) {
+  return { sku: it.sku, product: it.product, spec: it.spec, qty: it.qty, unit: it.unit, floor: it.target_usd_fob.lo, ceiling: it.target_usd_fob.hi };
+});
+
 root.SEED = {
   meta: META, suppliers: SUPPLIERS, rfqs: RFQS, emails: EMAILS,
-  formats: FORMATS, buyer: BUYER, templates: ATT_TEMPLATES
+  formats: FORMATS, buyer: BUYER, templates: ATT_TEMPLATES, sampleLines30: SAMPLE_LINES_30
 };
 
 })(typeof window !== 'undefined' ? window : globalThis);

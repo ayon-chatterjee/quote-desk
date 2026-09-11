@@ -9,8 +9,8 @@ var A = window.APP = {
   deep: false,             // force the strongest model on extraction
   filter: null, toastT: null,
   expected: {}, composed: [], running: {},
-  inbox: { seen: {}, syncing: false, autoRead: false, progress: null },
-  draft: null, pick: {}
+  inbox: { seen: {}, syncing: false, autoRead: true, progress: null, paused: false },
+  draft: null, pick: {}, sv: {}, svPreview: {} /* Supplier view: 'rfqId:supplierId' -> {persona, toggles, format} / generated preview */
 };
 S.emails.forEach(function (e) { if (e.expected) A.expected[e.sample_id] = e.expected; });
 
@@ -84,9 +84,33 @@ A.openReviews = function () { return A.store.reviews.filter(function (r) { retur
 A.draftReplies = function () { return A.store.replies.filter(function (r) { return r.status === 'draft'; }); };
 A.rfqById = function (id) { return PL.rfqById(A.store, id); };
 A.supById = function (id) { return PL.sup(A.store, id); };
+A.headerById = function (id) { return PL.headerById(A.store, id); };
+A.isMultiLine = function (rfq) { return R.rfqItems(rfq).length > 1; };
+
+/* ---- Supplier view: who can compose a reply for this RFQ --------------- */
+/* Recipients get the letter matching their position (A, B, C…); a synthetic "unknown
+   sender" persona is always offered last, since almost every RFQ attracts one. */
+A.supplierTabs = function (rfq) {
+  var letters = 'ABCDEFGH';
+  var tabs = (rfq.recipients || []).map(function (id, i) {
+    return { key: letters[i] || String(i + 1), supplier: A.supById(id), unknown: false };
+  });
+  tabs.push({ key: letters[tabs.length] || 'X', supplier: { id: null, name: 'Unknown sender', unknown: true }, unknown: true });
+  return tabs;
+};
+A.svKey = function (rfqId, supplierId) { return rfqId + ':' + (supplierId || 'unknown'); };
+A.svGet = function (rfqId, supplierId, tabKey) {
+  var key = A.svKey(rfqId, supplierId);
+  if (!A.sv[key]) {
+    var persona = G.PERSONAS[tabKey] ? tabKey : 'A';
+    A.sv[key] = { persona: persona, toggles: Object.assign({}, G.PERSONAS[persona].toggles), format: G.PERSONAS[persona].format };
+  }
+  return A.sv[key];
+};
 
 /* ---- storage ---------------------------------------------------------- */
-var COLLECTIONS = ['emails', 'quotes', 'reviews', 'comparisons', 'evals', 'logs', 'replies', 'samples'];
+var COLLECTIONS = ['emails', 'quotes', 'quote_headers', 'reviews', 'comparisons', 'evals', 'logs', 'replies', 'samples', 'awards'];
+var READ_LIMIT = 900;
 function plain(o) { return JSON.parse(JSON.stringify(o)); }
 function stripBlobs(e) { var c = plain(e); (c.attachments || []).forEach(function (a) { delete a.blob; }); return c; }
 
@@ -102,13 +126,14 @@ A.initDownloads = function () {
 A.loadFromDb = function () {
   if (!A.db) return Promise.resolve(false);
   var reads = COLLECTIONS.map(function (c) {
-    return A.db.collection(c).limit(400).get().then(function (snap) {
+    return A.db.collection(c).limit(READ_LIMIT).get().then(function (snap) {
+      if (snap.docs.length === READ_LIMIT) console.warn('Quote Desk: collection "' + c + '" returned exactly the read limit (' + READ_LIMIT + ') — some documents may be missing.');
       return { c: c, docs: snap.docs.map(function (d) { return d.data(); }) };
     }, function () { return { c: c, docs: [] }; });
   });
   reads.push(A.db.doc('meta/config').get().then(function (d) { return { c: 'meta', docs: d.exists ? [d.data()] : [] }; }, function () { return { c: 'meta', docs: [] }; }));
   reads.push(A.db.doc('state/inbox').get().then(function (d) { return { c: 'state', docs: d.exists ? [d.data()] : [] }; }, function () { return { c: 'state', docs: [] }; }));
-  reads.push(A.db.collection('rfqs').limit(60).get().then(function (s) { return { c: 'rfqs', docs: s.docs.map(function (d) { return d.data(); }) }; }, function () { return { c: 'rfqs', docs: [] }; }));
+  reads.push(A.db.collection('rfqs').limit(200).get().then(function (s) { return { c: 'rfqs', docs: s.docs.map(function (d) { return d.data(); }) }; }, function () { return { c: 'rfqs', docs: [] }; }));
   return Promise.all(reads).then(function (res) {
     var got = {}; res.forEach(function (r) { got[r.c] = r.docs; });
     var any = got.emails.length || got.samples.length || got.rfqs.length || got.state.length;
@@ -116,14 +141,17 @@ A.loadFromDb = function () {
     var st = PL.newStore(S);
     if (got.meta[0]) st.meta = got.meta[0];
     if (got.rfqs.length) st.rfqs = got.rfqs;
-    st.emails = got.emails; st.quotes = got.quotes; st.reviews = got.reviews;
+    st.rfqs.forEach(function (r) { R.normalizeRfq(r); });
+    st.emails = got.emails; st.quotes = got.quotes; st.quote_headers = got.quote_headers || []; st.reviews = got.reviews;
     st.comparisons = got.comparisons; st.evals = got.evals; st.logs = got.logs; st.replies = got.replies || [];
+    st.awards = {}; (got.awards || []).forEach(function (d) { st.awards[d.id] = { lines: d.lines || {} }; });
     A.store = st;
     A.composed = got.samples || [];
     if (got.state[0]) { A.inbox.seen = {}; (got.state[0].seen || []).forEach(function (id) { A.inbox.seen[id] = true; }); }
-    ['rfqs', 'emails', 'quotes', 'reviews', 'comparisons', 'evals', 'logs', 'replies'].forEach(function (c) {
+    ['rfqs', 'emails', 'quotes', 'quote_headers', 'reviews', 'comparisons', 'evals', 'logs', 'replies'].forEach(function (c) {
       (st[c] || []).forEach(function (d) { if (d && d.id) saved[c + '/' + safeId(d.id)] = JSON.stringify(d); });
     });
+    Object.keys(st.awards).forEach(function (rfqId) { saved['awards/' + safeId(rfqId)] = JSON.stringify(Object.assign({ id: rfqId }, st.awards[rfqId])); });
     A.composed.forEach(function (d) { saved['samples/' + safeId(d.id)] = JSON.stringify(d); });
     saved['meta/config'] = JSON.stringify(st.meta);
     saved['state/inbox'] = JSON.stringify(inboxState());
@@ -173,10 +201,12 @@ A.persistAll = function () {
       saved['state/inbox'] = stJson;
       jobs.push(A.db.doc('state/inbox').set(inboxState()).catch(function () { delete saved['state/inbox']; }));
     }
+    var awardDocs = Object.keys(st.awards).map(function (rfqId) { return Object.assign({ id: rfqId }, st.awards[rfqId]); });
     jobs.push(A.persistMany('rfqs', st.rfqs), A.persistMany('emails', st.emails),
-      A.persistMany('quotes', st.quotes), A.persistMany('reviews', st.reviews),
-      A.persistMany('comparisons', st.comparisons), A.persistMany('evals', st.evals),
-      A.persistMany('logs', st.logs), A.persistMany('replies', st.replies), A.persistMany('samples', A.composed));
+      A.persistMany('quotes', st.quotes), A.persistMany('quote_headers', st.quote_headers),
+      A.persistMany('reviews', st.reviews), A.persistMany('comparisons', st.comparisons), A.persistMany('evals', st.evals),
+      A.persistMany('logs', st.logs), A.persistMany('replies', st.replies), A.persistMany('samples', A.composed),
+      A.persistMany('awards', awardDocs));
     Promise.all(jobs).then(resolve, resolve);
   }, 700);
   return promise;
@@ -186,7 +216,7 @@ A.wipeDb = function () {
   if (!A.db) return Promise.resolve();
   var jobs = [];
   COLLECTIONS.concat(['rfqs']).forEach(function (c) {
-    jobs.push(A.db.collection(c).limit(400).get().then(function (s) {
+    jobs.push(A.db.collection(c).limit(READ_LIMIT).get().then(function (s) {
       return Promise.all(s.docs.map(function (d) { return A.db.collection(c).doc(d.id).delete().catch(function () {}); }));
     }, function () {}));
   });
@@ -344,7 +374,24 @@ A.adapters = function (mode, hooks) {
         if (!v.body) return tpl;
         return { subject: String(v.subject || tpl.subject), body: String(v.body), source: 'ai' };
       }, function () { return tpl; });
-    }
+    },
+    /* v2: chase a specific set of lines for one supplier from the Quotations tab */
+    replyLines: function (rfq, supplierName, items, lines) {
+      var tpl = G.draftLineReply(rfq, supplierName, items, lines, buyer, meta);
+      if (!useAi) return Promise.resolve(tpl);
+      var pb = P.buildReply({ kind: 'chase', subject: rfq.code, body_new: '', from_name: supplierName, from: '' }, null, rfq, items, buyer);
+      return askJson(pb.prompt, { tier: 'quick', cache: false, signal: hooks.signal }).then(function (r) {
+        var v = r.value || {};
+        if (!v.body) return tpl;
+        return { subject: String(v.subject || tpl.subject), body: String(v.body), source: 'ai' };
+      }, function () { return tpl; });
+    },
+    /* v2: per-line best-value ranking across the contested lines of a multi-line RFQ.
+       Left undefined in reference mode so the pipeline settles every line by rule alone. */
+    awards: useAi ? function (cb, rfq, contested) {
+      return askJson(cb.prompt, { tier: 'complex', signal: hooks.signal, onText: hooks.onText, cache: false })
+        .then(function (r) { return { source: 'ai', tier: r.tier, ai: r.value }; });
+    } : undefined
   };
 };
 
@@ -421,15 +468,16 @@ A.saveFile = function (filename, data) {
 
 /* ---- template filling for the composer --------------------------------- */
 A.fillTemplate = function (str, rfq, supplierName) {
-  rfq = rfq || A.store.rfqs[0];
-  var tiers = G.tiersFor(rfq), mid = (rfq.target_usd_fob.lo + rfq.target_usd_fob.hi) / 2;
-  var unit = rfq.unit || 'pc', units = unit === 'pc' ? 'pcs' : unit + 's';
+  rfq = rfq || A.store.rfqs.filter(function (r) { return !A.isMultiLine(r); })[0] || A.store.rfqs[0];
+  var it0 = R.rfqItems(rfq)[0], band = it0.target_usd_fob;
+  var tiers = G.tiersFor(rfq), mid = (band.lo + band.hi) / 2;
+  var unit = it0.unit || 'pc', units = unit === 'pc' ? 'pcs' : unit + 's';
   var rmb = (mid * A.store.meta.fx.CNY), rmbS = rmb.toFixed(2);
   var vars = {
-    code: rfq.code, codeshort: rfq.code.replace('RFQ-', ''), product: rfq.product, qty: rfq.target_qty, unit: unit, units: units,
+    code: rfq.code, codeshort: rfq.code.replace('RFQ-', ''), product: rfq.product, qty: it0.qty, unit: unit, units: units,
     tier1: tiers[0], tier2: tiers[1], tier3: tiers[2], tier2m: tiers[1] - 1, tier3m: tiers[2] - 1,
     price: (mid * 0.98).toFixed(2), price_hi: (mid * 1.06).toFixed(2), price_lo: (mid * 0.9).toFixed(2), price_ddp: (mid * 1.25).toFixed(2),
-    band_lo: rfq.target_usd_fob.lo.toFixed(2), band_hi: rfq.target_usd_fob.hi.toFixed(2),
+    band_lo: band.lo.toFixed(2), band_hi: band.hi.toFixed(2),
     certs: (rfq.required_certs || []).join(' and ') || 'ISO 9001', cert1: (rfq.required_certs || [])[0] || 'ISO 9001',
     date: A.store.meta.demo_now, datecompact: A.store.meta.demo_now.replace(/-/g, ''), valid: R.addDays(A.store.meta.demo_now, 30), sent: rfq.sent_at,
     buyer: S.buyer.name, buyeremail: S.buyer.email, supplier: supplierName || 'New Factory Co., Ltd', SUPPLIER: (supplierName || 'New Factory Co., Ltd').toUpperCase(),
@@ -466,13 +514,13 @@ A.render = function () {
 
 A.paintNav = function () {
   var path = A.current();
-  var openN = A.openReviews().length + A.draftReplies().length;
-  var unread = A.arrived().filter(function (e) { return !A.emailById(e.id); }).length;
+  var manual = A.store.emails.filter(function (e) { return e.label === 'manual'; }).length;
   var waiting = A.unsynced().length;
   var primary = [
-    ['#/rfqs', 'Inquiries', A.store.rfqs.length, /^\/rfqs?(\/|$)|^\/compare\//],
-    ['#/inbox', 'Emails', unread || (waiting ? '+' + waiting : 0), /^\/inbox|^\/email\//],
-    ['#/reviews', 'Your queue', openN, /^\/reviews/]
+    ['#/rfqs', 'Inquiries', A.store.rfqs.length, /^\/rfqs?(\/|$)/],
+    ['#/supplier', 'Supplier view', null, /^\/supplier/],
+    ['#/inbox', 'Emails', manual || (waiting ? '+' + waiting : 0), /^\/inbox|^\/email\/|^\/reviews/],
+    ['#/quotations', 'Quotations', null, /^\/quotations|^\/compare\//]
   ];
   var secondary = [
     ['#/evals', 'Evals', A.store.evals.length, /^\/evals/],
@@ -480,7 +528,7 @@ A.paintNav = function () {
   ];
   function item(it, small) {
     var on = it[3].test(path);
-    var hot = (it[1] === 'Your queue' && it[2] > 0) || (it[1] === 'Emails' && typeof it[2] === 'string');
+    var hot = it[1] === 'Emails' && (typeof it[2] === 'string' || it[2] > 0);
     return '<a href="' + it[0] + '"' + (on ? ' aria-current="page"' : '') + (small ? ' class="small"' : '') + '>' + esc(it[1]) +
       (it[2] == null || it[2] === 0 ? '' : '<span class="n' + (hot ? ' hot' : '') + '">' + it[2] + '</span>') + '</a>';
   }

@@ -404,4 +404,168 @@ G.draftPayload = function (draft) {
   };
 };
 
+/* ---- sampleScenario ---------------------------------------------------- */
+
+G.sampleScenario = function (rng, rfq, supplierRec) {
+  var G2 = root.GENERATOR;
+  var kinds = ['quote', 'quote', 'quote', 'clarification', 'silent'];
+  var kind = rng.weighted(kinds.map(function (k) { return [k, k === 'quote' ? 3 : k === 'clarification' ? 1.5 : 0.5]; }));
+  if (kind === 'silent') return { kind: 'silent', personaKey: 'D', toggles: {}, format: 'inline', facts: { plantedProblems: ['SILENT'] } };
+
+  var personaKeys = supplierRec ? ['A', 'B', 'C'] : ['A', 'B'];
+  var personaKey = rng.pick(personaKeys);
+  if (kind === 'clarification') personaKey = rng.pick(['A', 'B', 'C', 'D'].filter(function (k) { return k !== 'D'; }));
+
+  var activeToggles = G2.TOGGLE_LIST.filter(function (t) { return rng.chance(0.25); });
+  var toggles = {};
+  activeToggles.forEach(function (t) { toggles[t.key] = true; });
+  if (!supplierRec) { toggles.unknownSender = true; toggles.noRfqCode = rng.chance(0.5); }
+
+  var format = rng.pick(G2.FORMATS_V2);
+  var items = root.RULES.rfqItems(rfq);
+  var meta = { fx: { CNY: 7.15 } };
+  var scenario = G2.scenarioFromToggles(rfq, supplierRec || { id: null, unknown: true, name: '', city: 'China', domains: ['trade-co.com'] }, personaKey, toggles, format, meta, rng);
+  scenario.kind = kind;
+  return scenario;
+};
+
+/* ---- sampleFollowUp ---------------------------------------------------- */
+
+G.sampleFollowUp = function (rng, rfq, supplierRec, reply, meta, buyer) {
+  var G2 = root.GENERATOR;
+  if (!supplierRec || !reply) return null;
+  var personaKey = (reply.persona_key) || rng.pick(['A', 'B', 'C']);
+  return G2.answerFollowUp(rfq, supplierRec, personaKey, reply, meta, buyer);
+};
+
+/* ---- sampleBrief ------------------------------------------------------- */
+
+var BRIEF_STYLES = ['tabbed', 'prose', 'mixed'];
+
+G.sampleBrief = function (rng, size) {
+  var req = G.sampleRequest(rng, size);
+  var style = rng.pick(BRIEF_STYLES);
+
+  var omitPool = ['required_certs', 'max_lead_days', 'dest_port', 'custom_questions', 'pl_required'];
+  var omitCount = rng.int(2, 4);
+  var omitted = rng.take(omitPool, omitCount);
+  var omittedSet = {};
+  omitted.forEach(function (k) { omittedSet[k] = true; });
+
+  var thinLineIndices = [];
+  if (rng.chance(0.5)) {
+    var idx = rng.int(0, req.items.length - 1);
+    thinLineIndices.push(idx);
+  }
+
+  var lines = [];
+  if (style === 'tabbed') {
+    lines.push('Product briefing — ' + req.title);
+    lines.push('');
+    if (!omittedSet.required_certs && req.required_certs.length) lines.push('Certifications required: ' + req.required_certs.join(', '));
+    if (!omittedSet.dest_port && req.dest_port) lines.push('Destination: ' + req.dest_port);
+    if (!omittedSet.max_lead_days && req.max_lead_days) lines.push('Lead time: max ' + req.max_lead_days + ' days');
+    if (!omittedSet.pl_required) lines.push('Private label: ' + (req.pl_required ? 'yes' : 'no'));
+    lines.push('');
+    lines.push('SKU\tProduct\tQty\tTarget price (USD FOB)');
+    req.items.forEach(function (it, i) {
+      var isThin = thinLineIndices.indexOf(i) >= 0;
+      lines.push(it.sku + '\t' + it.product + '\t' + (isThin ? '' : String(it.qty)) + '\t' + (isThin ? '' : it.floor.toFixed(2) + ' - ' + it.ceiling.toFixed(2)));
+    });
+  } else if (style === 'prose') {
+    lines.push('Hi, we are looking for suppliers for ' + req.title + '.');
+    lines.push('');
+    lines.push(req.spec);
+    lines.push('');
+    req.items.forEach(function (it, i) {
+      var isThin = thinLineIndices.indexOf(i) >= 0;
+      lines.push('- ' + it.product + ' (' + it.sku + ')' + (isThin ? '' : ': ' + it.qty + ' units, target ' + it.floor.toFixed(2) + '-' + it.ceiling.toFixed(2) + ' USD FOB'));
+    });
+    if (!omittedSet.required_certs && req.required_certs.length) lines.push('Certifications: ' + req.required_certs.join(', '));
+    if (!omittedSet.dest_port && req.dest_port) lines.push('Port: ' + req.dest_port);
+  } else {
+    lines.push(req.title);
+    lines.push(req.spec);
+    lines.push('');
+    lines.push('Lines:');
+    req.items.forEach(function (it, i) {
+      var isThin = thinLineIndices.indexOf(i) >= 0;
+      lines.push(it.sku + ' | ' + it.product + ' | ' + (isThin ? 'TBD' : it.qty + ' pcs') + ' | ' + (isThin ? 'TBD' : '$' + it.floor.toFixed(2) + '-' + it.ceiling.toFixed(2)));
+    });
+    if (!omittedSet.required_certs && req.required_certs.length) lines.push('Certs needed: ' + req.required_certs.join(', '));
+    if (!omittedSet.max_lead_days && req.max_lead_days) lines.push('Max lead time: ' + req.max_lead_days + ' days');
+    if (!omittedSet.dest_port && req.dest_port) lines.push('Destination port: ' + req.dest_port);
+  }
+
+  return { text: lines.join('\n'), omitted: omitted, style: style, _req: req };
+};
+
+/* ---- intakeRules ------------------------------------------------------- */
+
+G.intakeRules = function (text, draft, meta) {
+  var G2 = root.GENERATOR, R = root.RULES;
+  draft = draft || {};
+  var lower = text.toLowerCase();
+
+  /* 1. If last assistant message asked specific fields, try to parse answers */
+  var fieldPatterns = [
+    { field: 'dest_port', re: /\b(shanghai|shenzhen|guangzhou|ningbo|tianjin|qingdao|long beach|los angeles|rotterdam|felixstowe|hamburg|le havre|singapore|dubai|mumbai|los angeles|new york|miami|houston|seattle|chicago)\b/i, parse: function (m) { return m[0].charAt(0).toUpperCase() + m[0].slice(1).toLowerCase(); } },
+    { field: 'max_lead_days', re: /(\d+)\s*(?:days?|working\s*days?|weeks?(?:\s*\((\d+)\s*days?\))?)/i, parse: function (m) { return m[2] ? parseInt(m[2]) : /week/.test(m[0]) ? parseInt(m[1]) * 7 : parseInt(m[1]); } },
+    { field: 'pl_required', re: /\b(yes|no|private\s*label|our\s*logo|own\s*brand)\b/i, parse: function (m) { return !/\bno\b/.test(m[0].toLowerCase()); } },
+    { field: 'custom_required', re: /\b(custom|bespoke|off.the.shelf|stock\s*item|standard)\b/i, parse: function (m) { return !/off.the.shelf|stock|standard/.test(m[0].toLowerCase()); } }
+  ];
+
+  fieldPatterns.forEach(function (fp) {
+    if (draft[fp.field] == null) {
+      var m = lower.match(fp.re) || text.match(fp.re);
+      if (m) draft[fp.field] = fp.parse(m);
+    }
+  });
+
+  /* 2. Parse cert names */
+  if (!draft.required_certs || !draft.required_certs.length) {
+    var certMatches = text.match(/\b(CE|RoHS|REACH|FDA|LFGB|EN\s*71|ASTM\s*F963|ISO\s*9001|BRC|FSC|PEFC|GRS|OEKO-TEX|BSCI|SMETA)\b/g);
+    if (certMatches && certMatches.length) {
+      draft.required_certs = certMatches.map(function (c) { return (R.canonCert && R.canonCert(c)) || c; }).filter(function (c, i, a) { return a.indexOf(c) === i; });
+    }
+  }
+
+  /* 3. Parse pasted rows into items[] */
+  if (!draft.items || !draft.items.length) {
+    var itemRows = [];
+    var lines = text.split('\n');
+    lines.forEach(function (line) {
+      var parts = line.split(/\t|\s*\|\s*|\s{2,}/);
+      if (parts.length >= 3) {
+        var sku = parts[0].trim(), product = parts[1].trim();
+        var qtyStr = parts[2].trim().replace(/,/g, '');
+        var qty = parseInt(qtyStr);
+        if (sku && product && qty > 0 && /^[A-Z0-9\-_]{2,12}$/i.test(sku)) {
+          var lo = 0, hi = 0;
+          if (parts[3]) {
+            var priceStr = parts[3].trim().replace(/[$,]/g, '');
+            var priceParts = priceStr.split(/[-–]/);
+            lo = parseFloat(priceParts[0]) || 0;
+            hi = parseFloat(priceParts[1] || priceParts[0]) || lo;
+          }
+          itemRows.push({ sku: sku.toUpperCase(), product: product, qty: qty, unit: 'pc', floor: lo, ceiling: hi, spec: '' });
+        }
+      }
+    });
+    if (itemRows.length >= 2) draft.items = itemRows;
+  }
+
+  /* 4. Recompute readiness and generate questions */
+  var payload = G.draftPayload(draft);
+  var findings = G2.readinessRules(payload);
+  var questions = findings.missing.filter(function (m) { return m.severity === 'must'; }).slice(0, 3)
+    .map(function (m) { return { field: m.field, text: m.suggestion || m.label + '?', required: true }; });
+  if (questions.length < 3) {
+    var shouldItems = findings.missing.filter(function (m) { return m.severity === 'should'; }).slice(0, 3 - questions.length);
+    shouldItems.forEach(function (m) { questions.push({ field: m.field, text: m.suggestion || m.label + '?', required: false }); });
+  }
+
+  return { draft: draft, findings: findings, questions: questions, ready: findings.ready };
+};
+
 })(typeof window !== 'undefined' ? window : globalThis);
